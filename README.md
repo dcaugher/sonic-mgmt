@@ -14,7 +14,7 @@ All contributors must sign an [Individual Contributor License Agreement (ICLA)](
 
 ### GitHub Workflow
 
-We're following basic GitHub Flow. If you have no idea what we're talking about, check out [GitHub's official guide](https://guides.github.com/introduction/flow/). Note that merge is only performed by the repository maintainer.
+We're following basic GitHub Flow! If you have no idea what we're talking about, check out [GitHub's official guide](https://guides.github.com/introduction/flow/). Note that merge is only performed by the repository maintainer.
 
 Guide for performing commits:
 
