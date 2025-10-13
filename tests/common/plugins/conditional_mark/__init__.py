@@ -368,6 +368,10 @@ def load_basic_facts(dut_name, session):
     testbed_file = session.config.option.testbed_file
 
     tbinfo = TestbedInfo(testbed_file).testbed_topo.get(testbed_name, None)
+    if not tbinfo:
+        raise RuntimeError("Failed to get testbed info for testbed {} in file {}".format(testbed_name, testbed_file))
+    if 'topo' not in tbinfo or 'type' not in tbinfo['topo'] or 'name' not in tbinfo['topo']:
+        raise RuntimeError("Invalid testbed info for testbed {} from file {}".format(testbed_name, testbed_file))
 
     results['topo_type'] = tbinfo['topo']['type']
     results['topo_name'] = tbinfo['topo']['name']

@@ -11,6 +11,7 @@ from tests.common.gu_utils import apply_patch, expect_op_success, expect_op_fail
 from tests.common.gu_utils import generate_tmpfile, delete_tmpfile
 from tests.common.gu_utils import create_checkpoint, delete_checkpoint, rollback_or_reload
 from tests.common.gu_utils import is_valid_platform_and_version
+from tests.common.helpers.temp_file_context import temporary_file
 
 pytestmark = [
     pytest.mark.topology('any')
@@ -252,17 +253,15 @@ def test_stop_pfcwd(duthost, extract_pfcwd_config, ensure_dut_readiness, port):
     # Removing the JSON patch formatting because the above patch includes interfaces
     # that may belong to multiple ASICs, and the formatting has already been handled per interface.
     # json_patch = format_json_patch_for_multiasic(duthost=duthost, json_data=json_patch, is_asic_specific=True)
-    try:
-        tmpfile = generate_tmpfile(duthost)
+    with temporary_file(duthost) as tmpfile:
         output = apply_patch(duthost, json_data=json_patch, dest_file=tmpfile)
         expect_op_success(duthost, output)
         pfcwd_updated_config = duthost.shell("show pfcwd config")
         pytest_assert(not pfcwd_updated_config['rc'], "Unable to read updated pfcwd config")
         pytest_assert(exp_str not in pfcwd_updated_config['stdout'].split(),
-                      "pfcwd unexpectedly still running")
+                    "pfcwd unexpectedly still running")
         check_config_update(duthost, expected_count)
-    finally:
-        delete_tmpfile(duthost, tmpfile)
+
 
 
 @pytest.mark.parametrize('port', ['single', 'all'])
@@ -303,8 +302,7 @@ def test_start_pfcwd(duthost, extract_pfcwd_config, ensure_dut_readiness, stop_p
     # Removing the JSON patch formatting because the above patch includes interfaces
     # that may belong to multiple ASICs, and the formatting has already been handled per interface.
     # json_patch = format_json_patch_for_multiasic(duthost=duthost, json_data=json_patch, is_asic_specific=True)
-    try:
-        tmpfile = generate_tmpfile(duthost)
+    with temporary_file(duthost) as tmpfile:
         output = apply_patch(duthost, json_data=json_patch, dest_file=tmpfile)
         if is_valid_platform_and_version(duthost, "PFC_WD", "PFCWD enable/disable", op):
             expect_op_success(duthost, output)
@@ -315,5 +313,3 @@ def test_start_pfcwd(duthost, extract_pfcwd_config, ensure_dut_readiness, stop_p
             check_config_update(duthost, expected_count)
         else:
             expect_op_failure(output)
-    finally:
-        delete_tmpfile(duthost, tmpfile)
