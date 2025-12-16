@@ -55,16 +55,35 @@ def check_interface_status_of_up_ports(duthost):
     if duthost.facts['asic_type'] == 'vs' and duthost.is_supervisor_node():
         return True
 
+    # Cisco 8000 platforms have internal backplane ports (Ethernet-BP*) and inband ports
+    # (Ethernet-IB*) for inter-ASIC communication. These ports may not link up depending on
+    # the chassis configuration and should be excluded from operational status checks.
+    asic_type = duthost.facts.get('asic_type', '')
+    is_cisco_8000 = asic_type == 'cisco-8000'
+
     if duthost.is_multi_asic:
         up_ports = []
         for asic in duthost.frontend_asics:
             asic_cfg_facts = asic.config_facts(host=duthost.hostname, source="running",
                                                namespace=asic.namespace)['ansible_facts']
-            asic_up_ports = [p for p, v in list(asic_cfg_facts['PORT'].items()) if v.get('admin_status', None) == 'up']
+            if is_cisco_8000:
+                asic_up_ports = [p for p, v in list(asic_cfg_facts['PORT'].items())
+                                if v.get('admin_status', None) == 'up'
+                                and 'Ethernet-BP' not in p
+                                and 'Ethernet-IB' not in p]
+            else:
+                asic_up_ports = [p for p, v in list(asic_cfg_facts['PORT'].items())
+                                if v.get('admin_status', None) == 'up']
             up_ports.extend(asic_up_ports)
     else:
         cfg_facts = duthost.get_running_config_facts()
-        up_ports = [p for p, v in list(cfg_facts['PORT'].items()) if v.get('admin_status', None) == 'up']
+        if is_cisco_8000:
+            up_ports = [p for p, v in list(cfg_facts['PORT'].items())
+                       if v.get('admin_status', None) == 'up'
+                       and 'Ethernet-BP' not in p
+                       and 'Ethernet-IB' not in p]
+        else:
+            up_ports = [p for p, v in list(cfg_facts['PORT'].items()) if v.get('admin_status', None) == 'up']
 
     intf_facts = duthost.interface_facts(up_ports=up_ports)['ansible_facts']
     if len(intf_facts['ansible_interface_link_down_ports']) != 0:

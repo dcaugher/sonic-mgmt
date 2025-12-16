@@ -131,12 +131,23 @@ def check_interfaces(duthosts, tbinfo):
             else False
         )
 
+        # Cisco 8000 platforms have internal backplane ports (Ethernet-BP*) and inband ports
+        # (Ethernet-IB*) for inter-ASIC communication. These ports may not link up depending on
+        # the chassis configuration and should be excluded from interface sanity checks.
+        asic_type = dut.facts.get('asic_type', '')
+        is_cisco_8000 = asic_type == 'cisco-8000'
+
         for asic in dut.asics:
             ip_interfaces = []
             cfg_facts = asic.config_facts(host=dut.hostname,
                                           source="persistent", verbose=False)['ansible_facts']
-            phy_interfaces = [k for k, v in list(cfg_facts["PORT"].items()) if
-                              "admin_status" in v and v["admin_status"] == "up"]
+            if is_cisco_8000:
+                phy_interfaces = [k for k, v in list(cfg_facts["PORT"].items()) if
+                                  "admin_status" in v and v["admin_status"] == "up"
+                                  and "Ethernet-BP" not in k and "Ethernet-IB" not in k]
+            else:
+                phy_interfaces = [k for k, v in list(cfg_facts["PORT"].items()) if
+                                  "admin_status" in v and v["admin_status"] == "up"]
             if "PORTCHANNEL_INTERFACE" in cfg_facts:
                 ip_interfaces = list(cfg_facts["PORTCHANNEL_INTERFACE"].keys())
             if "VLAN_INTERFACE" in cfg_facts:
