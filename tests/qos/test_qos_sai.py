@@ -29,7 +29,8 @@ from tabulate import tabulate
 
 from tests.common.fixtures.conn_graph_facts import fanout_graph_facts, conn_graph_facts, get_graph_facts    # noqa: F401
 from tests.common.fixtures.duthost_utils import dut_qos_maps, \
-    separated_dscp_to_tc_map_on_uplink, load_dscp_to_pg_map                                 # noqa: F401
+    separated_dscp_to_tc_map_on_uplink, load_dscp_to_pg_map, \
+    disable_control_plane_drop_checker                                                      # noqa: F401
 from tests.common.fixtures.ptfhost_utils import copy_ptftests_directory                     # noqa: F401
 from tests.common.fixtures.ptfhost_utils import copy_saitests_directory                     # noqa: F401
 from tests.common.fixtures.ptfhost_utils import change_mac_addresses                        # noqa: F401
@@ -1171,7 +1172,7 @@ class TestQosSai(QosSaiBase):
     def testQosSaiBufferPoolWatermark(
         self, request, get_src_dst_asic_and_duts, bufPool, ptfhost, dutTestParams, dutConfig, dutQosConfig,
         ingressLosslessProfile, egressLossyProfile, resetWatermark,
-        skip_src_dst_different_asic
+        skip_src_dst_different_asic, disable_control_plane_drop_checker  # noqa: F811
     ):
         """
             Test QoS SAI Queue buffer pool watermark for lossless/lossy traffic
@@ -1185,6 +1186,9 @@ class TestQosSai(QosSaiBase):
                 ingressLosslessProfile (Fixture): Map of ingress lossless buffer profile attributes
                 egressLossyProfile (Fixture): Map of egress lossy buffer profile attributes
                 resetWatermark (Fixture): reset watermarks
+                disable_control_plane_drop_checker (Fixture): Disables monit's controlPlaneDropCheck
+                    during this test. Buffer-stressing tests may cause incidental kernel packet drops
+                    which are expected and protected by CoPP, not indicative of system failure.
 
             Returns:
                 None
@@ -1713,7 +1717,7 @@ class TestQosSai(QosSaiBase):
     def testQosSaiPgSharedWatermark(
         self, pgProfile, ptfhost, get_src_dst_asic_and_duts, dutTestParams, dutConfig, dutQosConfig,
         resetWatermark, skip_src_dst_different_asic, change_lag_lacp_timer, blockGrpcTraffic,
-        iptables_drop_ipv6_tx  # noqa: F811
+        iptables_drop_ipv6_tx, disable_control_plane_drop_checker  # noqa: F811
     ):
         """
             Test QoS SAI PG shared watermark test for lossless/lossy traffic
@@ -1726,6 +1730,9 @@ class TestQosSai(QosSaiBase):
                     and test ports
                 dutQosConfig (Fixture, dict): Map containing DUT host QoS configuration
                 resetWatermark (Fxiture): reset queue watermarks
+                disable_control_plane_drop_checker (Fixture): Disables monit's controlPlaneDropCheck
+                    during this test. Buffer-stressing tests may cause incidental kernel packet drops
+                    which are expected and protected by CoPP, not indicative of system failure.
 
             Returns:
                 None
@@ -1888,18 +1895,25 @@ class TestQosSai(QosSaiBase):
         )
 
     def testQosSaiPGDrop(
-        self, ptfhost, dutTestParams, dutConfig, dutQosConfig, skip_400g_longlink
+        self, ptfhost, dutTestParams, dutConfig, dutQosConfig, skip_400g_longlink,
+        disable_control_plane_drop_checker  # noqa: F811
     ):
         """
             Test QoS SAI PG drop counter
+
             Args:
                 ptfhost (AnsibleHost): Packet Test Framework (PTF)
                 dutTestParams (Fixture, dict): DUT host test params
                 dutConfig (Fixture, dict): Map of DUT config containing dut interfaces, test port IDs, test port IPs,
                     and test ports
                 dutQosConfig (Fixture, dict): Map containing DUT host QoS configuration
+                disable_control_plane_drop_checker (Fixture): Disables monit's controlPlaneDropCheck
+                    during this test. Buffer-stressing tests may cause incidental kernel packet drops
+                    which are expected and protected by CoPP, not indicative of system failure.
+
             Returns:
                 None
+
             Raises:
                 RunAnsibleModuleFail if ptf test fails
         """

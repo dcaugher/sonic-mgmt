@@ -101,6 +101,53 @@ def start_route_checker_on_duthost(duthost):
     duthost.command("sudo monit start routeCheck", module_ignore_errors=True)
 
 
+def stop_control_plane_drop_checker_on_duthost(duthost):
+    """Stop the controlPlaneDropCheck monit check on the DUT."""
+    duthost.command("sudo monit stop controlPlaneDropCheck", module_ignore_errors=True)
+
+
+def start_control_plane_drop_checker_on_duthost(duthost):
+    """Start the controlPlaneDropCheck monit check on the DUT."""
+    duthost.command("sudo monit start controlPlaneDropCheck", module_ignore_errors=True)
+
+
+def _disable_control_plane_drop_checker(duthost):
+    """
+    Temporarily disable the controlPlaneDropCheck monit check during buffer-stressing tests.
+
+    Background:
+        The controlPlaneDropCheck monitors /proc/net/softnet_stat for kernel packet drops.
+        When the kernel's network stack cannot process packets fast enough (e.g., CPU backlog
+        queue full), packets are dropped and this counter increments. Monit alerts if drops
+        increase for 3 consecutive 5-minute cycles.
+
+    Why disable during QoS buffer tests:
+        Tests like testQosSaiBufferPoolWatermark, testQosSaiPgSharedWatermark, and testQosSaiPGDrop
+        intentionally stress the switch's buffer capacity by:
+        - Disabling egress ports to fill buffers
+        - Sending large volumes of traffic to trigger PFC/drops
+        - Testing memory limits and watermarks
+
+        This buffer pressure can cause incidental control plane packet drops as:
+        - ARP/ND packets for test traffic may be punted to CPU
+        - Protocol packets (LLDP, LACP) may queue behind test traffic
+        - The kernel's netdev backlog may overflow during high memory pressure
+
+        These drops are expected side effects of the test methodology, not actual system
+        failures. CoPP (Control Plane Policing) provides the real protection by rate-limiting
+        traffic to the CPU in hardware.
+
+    Args:
+        duthost: DUT fixture
+
+    Yields:
+        None - fixture disables check before test, re-enables after
+    """
+    stop_control_plane_drop_checker_on_duthost(duthost)
+    yield
+    start_control_plane_drop_checker_on_duthost(duthost)
+
+
 def _disable_route_checker(duthost):
     """
         Some test cases will add static routes for test, which may trigger route_checker
@@ -132,6 +179,18 @@ def disable_route_checker_module(duthosts, rand_one_dut_hostname):
     """
     duthost = duthosts[rand_one_dut_hostname]
     for func in _disable_route_checker(duthost):
+        yield func
+
+
+@pytest.fixture
+def disable_control_plane_drop_checker(duthosts, rand_one_dut_hostname):
+    """
+    Wrapper for _disable_control_plane_drop_checker, function level.
+    Use this fixture to prevent controlPlaneDropCheck alerts during tests
+    that stress buffers and may cause control plane packet drops.
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    for func in _disable_control_plane_drop_checker(duthost):
         yield func
 
 
