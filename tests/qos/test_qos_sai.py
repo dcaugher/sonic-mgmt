@@ -93,6 +93,100 @@ def ignore_expected_loganalyzer_exception(get_src_dst_asic_and_duts, loganalyzer
 
 
 @pytest.fixture(autouse=False)
+def reset_control_plane_drop_baseline(get_src_dst_asic_and_duts):
+    """
+    Fixture to reset the control plane drop check baseline after tests that
+    intentionally stress shared memory buffers.
+
+    Tests like testQosSaiSharedReservationSize fill shared memory buffers to
+    capacity, which can cause kernel softnet drops. The monit control_plane_drop_check
+    script detects these drops and logs an error that would trigger loganalyzer
+    failures in subsequent tests.
+
+    This fixture:
+    1. Allows the test to run (yield)
+    2. Waits for traffic to drain and buffers to recover
+    3. Verifies memory has recovered (with logging)
+    4. Resets the softnet_stats baseline to the current drop count so that
+       the monit check does not report the expected drops as new failures
+
+    Yields:
+        None
+    """
+    # Allow the test to execute
+    yield
+
+    # Post-test cleanup
+    src_dut = get_src_dst_asic_and_duts['src_dut']
+    logger.info("Post-test cleanup: Waiting for traffic drain and buffer recovery")
+
+    # Wait for traffic to drain and buffers to recover
+    # The PTF test only waits 4 seconds; we add additional recovery time
+    recovery_wait_seconds = 10
+    logger.info("Waiting %d seconds for traffic drain and buffer recovery", recovery_wait_seconds)
+    time.sleep(recovery_wait_seconds)
+
+    # Verify memory has recovered by checking /proc/meminfo
+    try:
+        meminfo_output = src_dut.shell("cat /proc/meminfo | grep -E 'MemAvailable|MemFree|MemTotal'")
+        meminfo_lines = meminfo_output['stdout'].strip()
+        logger.info("Post-test memory status:\n%s", meminfo_lines)
+
+        # Parse memory values for verification
+        mem_stats = {}
+        for line in meminfo_lines.split('\n'):
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].rstrip(':')
+                value_kb = int(parts[1])
+                mem_stats[key] = value_kb
+
+        if 'MemAvailable' in mem_stats and 'MemTotal' in mem_stats:
+            available_pct = (mem_stats['MemAvailable'] / mem_stats['MemTotal']) * 100
+            logger.info("Memory recovery verification: %.1f%% available (%d KB of %d KB)",
+                        available_pct, mem_stats['MemAvailable'], mem_stats['MemTotal'])
+            if available_pct < 10:
+                logger.warning("Low memory after test: only %.1f%% available", available_pct)
+        else:
+            logger.info("Memory stats retrieved but MemAvailable/MemTotal not found")
+    except Exception as e:
+        logger.warning("Could not verify memory status: %s", str(e))
+
+    # Reset the softnet_stats baseline file
+    # This prevents the monit control_plane_drop_check from detecting the expected
+    # drops that occurred during the test
+    baseline_file = "/tmp/softnet_dropped_count.txt"
+    try:
+        # Read current drop count from /proc/net/softnet_stat
+        # Each line has stats per CPU; drop count is in the second column (hex)
+        softnet_cmd = (
+            "python3 -c \""
+            "drop_count = 0; "
+            "f = open('/proc/net/softnet_stat', 'r'); "
+            "lines = f.readlines(); "
+            "f.close(); "
+            "[drop_count := drop_count + int(line.split()[1], 16) "
+            "for line in lines if line.strip() and len(line.split()) > 1]; "
+            "print(drop_count)\""
+        )
+        result = src_dut.shell(softnet_cmd)
+        current_drop_count = result['stdout'].strip()
+
+        # Update the baseline file with current drop count
+        src_dut.shell("echo {} > {}".format(current_drop_count, baseline_file))
+        logger.info("Reset control_plane_drop_check baseline to current drop count: %s",
+                    current_drop_count)
+    except Exception as e:
+        logger.warning("Could not reset control_plane_drop_check baseline: %s", str(e))
+        # Try a simpler approach - just remove the baseline file so it gets recreated
+        try:
+            src_dut.shell("rm -f {}".format(baseline_file), module_ignore_errors=True)
+            logger.info("Removed baseline file %s; monit will recreate on next check", baseline_file)
+        except Exception as e2:
+            logger.warning("Could not remove baseline file: %s", str(e2))
+
+
+@pytest.fixture(autouse=False)
 def check_skip_shared_res_test(
         sharedResSizeKey, dutQosConfig,
         get_src_dst_asic_and_duts, dutConfig):
@@ -985,11 +1079,17 @@ class TestQosSai(QosSaiBase):
     @pytest.mark.parametrize("sharedResSizeKey", ["shared_res_size_1", "shared_res_size_2"])
     def testQosSaiSharedReservationSize(
         self, sharedResSizeKey, ptfhost, dutTestParams, dutConfig, dutQosConfig,
-        get_src_dst_asic_and_duts, check_skip_shared_res_test
+        get_src_dst_asic_and_duts, check_skip_shared_res_test, reset_control_plane_drop_baseline
     ):
         # NOTE: Cisco T2 skip due to reduced number of port in multi asic
         """
             Test QoS SAI shared reservation size
+
+            This test intentionally fills shared memory buffers to capacity, which
+            may cause kernel softnet drops. The reset_control_plane_drop_baseline
+            fixture resets the monit baseline after the test to prevent false
+            positive failures in subsequent tests.
+
             Args:
                 sharedResSizeKey: qos.yml entry lookup key
                 ptfhost (AnsibleHost): Packet Test Framework (PTF)
