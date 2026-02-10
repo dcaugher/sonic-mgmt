@@ -246,7 +246,7 @@ class TSReporter(Reporter):
         else:
             return None
 
-    def _export_metrics(self, metrics_data: MetricsData):
+    def _export_metrics(self, metrics_data: "MetricsData"):
         """
         Export MetricsData using the configured OTLP exporter.
 
