@@ -92,7 +92,7 @@ def ignore_expected_loganalyzer_exception(get_src_dst_asic_and_duts, loganalyzer
                     loganalyzer[duthost.hostname].ignore_regex.extend(igx)
 
 
-@pytest.fixture(autouse=False)
+@pytest.fixture(scope="function", autouse=False)
 def reset_control_plane_drop_baseline(get_src_dst_asic_and_duts):
     """
     Fixture to reset the control plane drop check baseline after tests that
@@ -126,31 +126,64 @@ def reset_control_plane_drop_baseline(get_src_dst_asic_and_duts):
     logger.info("Waiting %d seconds for traffic drain and buffer recovery", recovery_wait_seconds)
     time.sleep(recovery_wait_seconds)
 
-    # Verify memory has recovered by checking /proc/meminfo
+    # Verify SMS buffer pools have recovered by checking watermarks
+    # This checks the NPU's fast-path Shared Memory Statistics rather than host RAM
     try:
-        meminfo_output = src_dut.shell("cat /proc/meminfo | grep -E 'MemAvailable|MemFree|MemTotal'")
-        meminfo_lines = meminfo_output['stdout'].strip()
-        logger.info("Post-test memory status:\n%s", meminfo_lines)
+        # Get buffer pool name to OID mapping
+        pool_map_output = src_dut.shell(
+            "sonic-db-cli COUNTERS_DB HGETALL COUNTERS_BUFFER_POOL_NAME_MAP",
+            module_ignore_errors=True
+        )
+        if pool_map_output['rc'] == 0 and pool_map_output['stdout'].strip():
+            import ast
+            pool_map = ast.literal_eval(pool_map_output['stdout'].strip())
 
-        # Parse memory values for verification
-        mem_stats = {}
-        for line in meminfo_lines.split('\n'):
-            parts = line.split()
-            if len(parts) >= 2:
-                key = parts[0].rstrip(':')
-                value_kb = int(parts[1])
-                mem_stats[key] = value_kb
+            # Check all available buffer pools
+            for pool_name, pool_oid in pool_map.items():
+                # Get pool size from ASIC_DB
+                size_cmd = (
+                    f"sonic-db-cli ASIC_DB HGET "
+                    f"'ASIC_STATE:SAI_OBJECT_TYPE_BUFFER_POOL:{pool_oid}' "
+                    f"SAI_BUFFER_POOL_ATTR_SIZE"
+                )
+                size_output = src_dut.shell(size_cmd, module_ignore_errors=True)
+                pool_size = int(size_output['stdout'].strip()) if (
+                    size_output['rc'] == 0 and size_output['stdout'].strip()
+                ) else 0
 
-        if 'MemAvailable' in mem_stats and 'MemTotal' in mem_stats:
-            available_pct = (mem_stats['MemAvailable'] / mem_stats['MemTotal']) * 100
-            logger.info("Memory recovery verification: %.1f%% available (%d KB of %d KB)",
-                        available_pct, mem_stats['MemAvailable'], mem_stats['MemTotal'])
-            if available_pct < 10:
-                logger.warning("Low memory after test: only %.1f%% available", available_pct)
+                # Try to get watermark from COUNTERS_DB
+                wm_cmd = (
+                    f"sonic-db-cli COUNTERS_DB HGET "
+                    f"'COUNTERS:{pool_oid}' SAI_BUFFER_POOL_STAT_WATERMARK_BYTES"
+                )
+                wm_output = src_dut.shell(wm_cmd, module_ignore_errors=True)
+                watermark = int(wm_output['stdout'].strip()) if (
+                    wm_output['rc'] == 0 and wm_output['stdout'].strip()
+                ) else None
+
+                if pool_size > 0:
+                    if watermark is not None:
+                        utilization_pct = (watermark / pool_size) * 100
+                        logger.info(
+                            "SMS buffer recovery: %s watermark %.1f%% (%d / %d bytes)",
+                            pool_name, utilization_pct, watermark, pool_size
+                        )
+                        if utilization_pct > 90:
+                            logger.warning(
+                                "High SMS buffer utilization after test: %.1f%% of %s",
+                                utilization_pct, pool_name
+                            )
+                    else:
+                        logger.info(
+                            "SMS buffer pool %s size: %d bytes (watermark stats not available)",
+                            pool_name, pool_size
+                        )
+                else:
+                    logger.info("Could not retrieve SMS buffer pool size for %s", pool_name)
         else:
-            logger.info("Memory stats retrieved but MemAvailable/MemTotal not found")
+            logger.info("Could not retrieve buffer pool mapping from COUNTERS_DB")
     except Exception as e:
-        logger.warning("Could not verify memory status: %s", str(e))
+        logger.warning("Could not verify SMS buffer status: %s", str(e))
 
     # Reset the softnet_stats baseline file
     # This prevents the monit control_plane_drop_check from detecting the expected
