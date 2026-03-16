@@ -12,6 +12,7 @@ import copy
 import time
 import collections
 
+from tests.common.devices import duthosts
 from tests.common.fixtures.ptfhost_utils import ptf_portmap_file  # noqa: F401
 from tests.common.helpers.assertions import pytest_assert, pytest_require
 from tests.common.helpers.multi_thread_utils import SafeThreadPoolExecutor
@@ -40,6 +41,54 @@ from tests.common.utilities import is_ipv6_only_topology
 
 logger = logging.getLogger(__name__)
 
+
+class Swapper:
+    """Helper class to abstract swap_syncd and restore_default_syncd for a single DUT.
+    Not all platforms use a docker registry for swapping syncd.
+    """
+
+    def __init__(self, duthost, creds, public_docker_registry=False,
+                 swap_function=docker.swap_syncd,
+                 restore_function=docker.restore_default_syncd):
+        self.duthost = duthost
+        self.swap_function = swap_function
+        self.restore_function = restore_function
+        if creds:
+            if public_docker_registry:
+                new_creds = copy.deepcopy(creds)
+                new_creds['docker_registry_host'] = new_creds['public_docker_registry_host']
+                new_creds['docker_registry_username'] = ''
+                new_creds['docker_registry_password'] = ''
+                self.creds = new_creds
+            else:
+                self.creds = creds
+        else:
+            self.creds = None
+
+    def swap_syncd(self):
+        self.swap_function(self.duthost, self.creds)
+
+    def restore_default_syncd(self):
+        self.restore_function(self.duthost, self.creds)
+
+
+def make_swapper(duthost, creds, public_docker_registry=False):
+    """Factory function to create a Swapper instance with the appropriate
+    swap and restore functions based on the platform.
+
+    Args:
+        duthost: Single duthost object
+        creds: Credentials dict for docker registry
+        public_docker_registry: Whether to use public docker registry
+    """
+    if is_cisco_device(duthost):
+        return Swapper(duthost, None, public_docker_registry,
+                       swap_function=docker.cisco_swap_syncd,
+                       restore_function=docker.cisco_restore_default_syncd)
+    else:
+        return Swapper(duthost, creds, public_docker_registry,
+                       swap_function=docker.swap_syncd,
+                       restore_function=docker.restore_default_syncd)
 
 class QosBase:
     """
@@ -658,27 +707,22 @@ class QosSaiBase(QosBase):
             logger.info("Swap syncd is not supported on VS platform")
             swapSyncd = False
         public_docker_reg = request.config.getoption("--public_docker_registry")
+
+        # Create a Swapper for each DUT (handles heterogeneous testbeds)
+        swappers = [make_swapper(dut, creds, public_docker_registry=public_docker_reg) for dut in dut_list]
+
         try:
             if swapSyncd:
-                if public_docker_reg:
-                    new_creds = copy.deepcopy(creds)
-                    new_creds['docker_registry_host'] = new_creds['public_docker_registry_host']
-                    new_creds['docker_registry_username'] = ''
-                    new_creds['docker_registry_password'] = ''
-                else:
-                    new_creds = creds
-
-                with SafeThreadPoolExecutor(max_workers=8) as executor:
-                    for duthost in dut_list:
-                        executor.submit(docker.swap_syncd, duthost, new_creds)
-
+                with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
+                    for swapper in swappers:
+                        executor.submit(swapper.swap_syncd)
             yield
-
         finally:
             if swapSyncd:
-                with SafeThreadPoolExecutor(max_workers=8) as executor:
-                    for duthost in dut_list:
-                        executor.submit(docker.restore_default_syncd, duthost, new_creds)
+                with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
+                    for swapper in swappers:
+                        executor.submit(swapper.restore_default_syncd)
+
 
     @pytest.fixture(scope='class', name="select_src_dst_dut_and_asic",
                     params=["single_asic", "single_dut_multi_asic",
