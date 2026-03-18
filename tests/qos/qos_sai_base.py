@@ -716,7 +716,7 @@ class QosSaiBase(QosBase):
                 with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
                     for swapper in swappers:
                         executor.submit(swapper.swap_syncd)
-            yield
+            yield swapSyncd
         finally:
             if swapSyncd:
                 with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
@@ -2180,13 +2180,16 @@ class QosSaiBase(QosBase):
                 logger.info("Adding docker0's IPv6 address since it was removed when disabing IPv6")
                 duthost.shell("ip -6 addr add {} dev docker0".format(all_docker0_ipv6_addrs[duthost.hostname]))
 
-        # TODO: Do we really need this ?
-        with SafeThreadPoolExecutor(max_workers=8) as executor:
-            for duthost in dut_list:
-                executor.submit(
-                    config_reload,
-                    duthost, config_source='config_db', safe_reload=True, check_intf_up_ports=True,
-                )
+        # Only config_reload here if swapSyncd_on_selected_duts teardown won't
+        # do its own reload. Back-to-back reloads trigger systemd start-rate-limit
+        # on services like pmon, causing critical_services_fully_started to fail.
+        if not swapSyncd_on_selected_duts:
+            with SafeThreadPoolExecutor(max_workers=8) as executor:
+                for duthost in dut_list:
+                    executor.submit(
+                        config_reload,
+                        duthost, config_source='config_db', safe_reload=True, check_intf_up_ports=True,
+                    )
 
     @pytest.fixture(scope='module', autouse=True)
     def dut_disable_pfcwd(self, duthosts):

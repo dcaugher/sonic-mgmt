@@ -2,6 +2,7 @@ import time
 import logging
 import os
 
+from tests.common.dualtor_checks import wait_for_dualtor_stabilization
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.helpers.parallel_utils import synchronized_config_reload
 from tests.common.plugins.loganalyzer.utils import support_ignore_loganalyzer
@@ -281,6 +282,24 @@ def config_reload(sonic_host, config_source='config_db', wait=120, start_bgp=Tru
     modular_chassis = sonic_host.get_facts().get("modular_chassis")
     wait = max(wait, 600) if modular_chassis else wait
 
+    # DualToR detection using authoritative DEVICE_METADATA check, with MUX_CABLE fallback.
+    # Dualtor topologies have additional mux-related services that may take longer to start.
+    is_dualtor = False
+
+    # test will die if this fails, which is fine since we need config facts for DualToR 
+    # detection and test can't proceed without them anyway    
+    config_facts = sonic_host.get_running_config_facts() 
+
+    # Primary: check DEVICE_METADATA.localhost.subtype (authoritative for DualToR)
+    device_metadata = config_facts.get('DEVICE_METADATA', {}).get('localhost', {})
+    if device_metadata.get('subtype') == 'DualToR':
+        is_dualtor = True
+        logger.info("DualToR detected via DEVICE_METADATA subtype")
+    # Fallback: check for MUX_CABLE table presence
+    elif 'MUX_CABLE' in config_facts and len(config_facts['MUX_CABLE']) > 0:
+        is_dualtor = True
+        logger.info("DualToR detected via MUX_CABLE table presence")
+
     # On smartswitch, wait for DPUs to reach expected state after config reload.
     # This prevents consecutive config reloads from triggering DPU admin state
     # changes before the previous transitions have completed.
@@ -308,6 +327,13 @@ def config_reload(sonic_host, config_source='config_db', wait=120, start_bgp=Tru
         if check_intf_up_ports:
             pytest_assert(wait_until(wait + 300, 20, 0, check_interface_status_of_up_ports, sonic_host),
                           "Not all ports that are admin up on are operationally up")
+        # DualToR stabilization: event-driven verification of mux subsystem after reload
+        # Waits for sequential events: container -> linkmgrd -> DB init -> CLI healthy
+        # For active-active: also waits for ASIC tunnel and gRPC channel
+        if is_dualtor:
+            mux_config = config_facts.get('MUX_CABLE', {})
+            pytest_assert(wait_for_dualtor_stabilization(sonic_host, mux_config),
+                          "DualToR stabilization incomplete - some events did not complete")
     else:
         time.sleep(wait)
 
