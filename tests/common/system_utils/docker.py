@@ -265,8 +265,21 @@ def cisco_swap_syncd(duthost, creds=None, namespace=DEFAULT_NAMESPACE):
         duthost.command("docker tag {}:latest {}:{}".format(
             docker_syncd_name, docker_syncd_name, "nonrpc"))
 
-        # Loading rpc image
-        docker_rpc_syncd_file = "/home/admin/" + docker_rpc_image + ".gz"
+        # Loading rpc image - get SSH login user (not root from become/sudo)
+        # Use logname to get the actual login user, fallback to checking inventory
+        result = duthost.shell("logname 2>/dev/null || echo ''", module_ignore_errors=True)
+        ssh_user = result['stdout'].strip()
+        if not ssh_user or ssh_user == 'root':
+            # Fallback: check inventory for ansible_ssh_user
+            # Handle both SonicHost and MultiAsicSonicHost
+            host_obj = getattr(duthost, 'sonichost', duthost)
+            try:
+                ssh_user = host_obj.host.options['variable_manager'].get_vars(
+                    host=host_obj.host.options['inventory_manager'].get_host(duthost.hostname)
+                ).get('ansible_ssh_user', 'admin')
+            except (AttributeError, KeyError):
+                ssh_user = 'admin'
+        docker_rpc_syncd_file = "/home/{}/{}".format(ssh_user, docker_rpc_image + ".gz")
         duthost.command("docker image load -i {}".format(docker_rpc_syncd_file))
 
         # Changing tag for rpc-syncd
