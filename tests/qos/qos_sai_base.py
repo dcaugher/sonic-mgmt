@@ -42,6 +42,37 @@ from tests.common.utilities import is_ipv6_only_topology
 logger = logging.getLogger(__name__)
 
 
+# INSTRUMENTATION: Module-level cache for systemd rate-limit (queried once, reused)
+# TODO: TEMPORARY - Remove before submitting any PR. This is for testing the rate-limit hypothesis.
+_systemd_rate_limit_sec = None
+
+
+def _query_systemd_rate_limit(duthost):
+    """
+    Query systemd StartLimitIntervalSec from pmon.service on the DUT.
+    Returns the interval in seconds (default 10 if query fails).
+
+    TODO: TEMPORARY - Remove before submitting any PR.
+    """
+    try:
+        result = duthost.shell("systemctl show pmon.service -p StartLimitIntervalSec", module_ignore_errors=True)
+        interval_str = result.get("stdout", "").strip()
+        # Parse value: format is "StartLimitIntervalSec=10s" or "StartLimitIntervalSec=10000000us"
+        if "=" in interval_str:
+            value_str = interval_str.split("=")[1]
+            if value_str.endswith("us"):
+                return int(value_str[:-2]) / 1000000
+            elif value_str.endswith("ms"):
+                return int(value_str[:-2]) / 1000
+            elif value_str.endswith("s"):
+                return int(value_str[:-1])
+            else:
+                return int(value_str)  # Assume raw seconds
+    except Exception as e:
+        logger.warning("INSTRUMENTATION: Failed to query rate-limit ({}), using 10s default".format(e))
+    return 10  # fallback default
+
+
 class Swapper:
     """Helper class to abstract swap_syncd and restore_default_syncd for a single DUT.
     Not all platforms use a docker registry for swapping syncd.
@@ -711,12 +742,20 @@ class QosSaiBase(QosBase):
         # Create a Swapper for each DUT (handles heterogeneous testbeds)
         swappers = [make_swapper(dut, creds, public_docker_registry=public_docker_reg) for dut in dut_list]
 
+        # INSTRUMENTATION: Query and cache systemd rate-limit early (before any config_reload)
+        # TODO: TEMPORARY - Remove before submitting any PR.
+        global _systemd_rate_limit_sec
+        if _systemd_rate_limit_sec is None:
+            _systemd_rate_limit_sec = _query_systemd_rate_limit(dut_list[0])
+            logger.info("INSTRUMENTATION: Cached systemd StartLimitIntervalSec={}s".format(_systemd_rate_limit_sec))
+
         try:
             if swapSyncd:
                 with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
                     for swapper in swappers:
                         executor.submit(swapper.swap_syncd)
-            yield swapSyncd
+            yield  # swapSyncd  # INSTRUMENTATION: backing out to test rate-limit hypothesis
+            # TODO: TEMPORARY - Restore to 'yield swapSyncd' before submitting any PR.
         finally:
             if swapSyncd:
                 with SafeThreadPoolExecutor(max_workers=min(len(swappers), 8)) as executor:
@@ -2183,6 +2222,12 @@ class QosSaiBase(QosBase):
         # Only config_reload here if swapSyncd_on_selected_duts teardown won't
         # do its own reload. Back-to-back reloads trigger systemd start-rate-limit
         # on services like pmon, causing critical_services_fully_started to fail.
+        # INSTRUMENTATION: Obey cached systemd rate-limit to test hypothesis
+        # TODO: TEMPORARY - Remove this sleep block before submitting any PR.
+        global _systemd_rate_limit_sec
+        sleep_time = (_systemd_rate_limit_sec or 10) + 5
+        logger.info("INSTRUMENTATION: Sleeping {}s to avoid systemd rate-limit".format(sleep_time))
+        time.sleep(sleep_time)
         if not swapSyncd_on_selected_duts:
             with SafeThreadPoolExecutor(max_workers=8) as executor:
                 for duthost in dut_list:
