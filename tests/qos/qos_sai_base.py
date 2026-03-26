@@ -2224,10 +2224,10 @@ class QosSaiBase(QosBase):
         # on services like pmon, causing critical_services_fully_started to fail.
         # INSTRUMENTATION: Obey cached systemd rate-limit to test hypothesis
         # TODO: TEMPORARY - Remove this sleep block before submitting any PR.
-        global _systemd_rate_limit_sec
-        sleep_time = (_systemd_rate_limit_sec or 10) + 5
-        logger.info("INSTRUMENTATION: Sleeping {}s to avoid systemd rate-limit".format(sleep_time))
-        time.sleep(sleep_time)
+        # global _systemd_rate_limit_sec
+        # sleep_time = (_systemd_rate_limit_sec or 10) + 5
+        # logger.info("INSTRUMENTATION: Sleeping {}s to avoid systemd rate-limit".format(sleep_time))
+        # time.sleep(sleep_time)
         if not swapSyncd_on_selected_duts:
             with SafeThreadPoolExecutor(max_workers=8) as executor:
                 for duthost in dut_list:
