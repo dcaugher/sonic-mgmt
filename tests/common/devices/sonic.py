@@ -573,6 +573,8 @@ class SonicHost(AnsibleHostBase):
         """
         result = self.critical_services_status()
         logging.debug("Status of critical services: %s" % str(result))
+        now = datetime.now()
+        logging.info("MISSING critical services (%s): %s" % (now.strftime("%m-%d %H:%M:%S"), str([service for service, status in result.items() if not status])))
         return all(result.values())
 
     def get_monit_services_status(self):
