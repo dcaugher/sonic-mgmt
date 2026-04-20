@@ -145,6 +145,126 @@ def _wait_for_smartswitch_dpu_states(sonic_host):
     logger.info("Smartswitch DPU state wait completed")
 
 
+def _get_topology_scale_wait_time(sonic_host, base_wait=0):
+    """
+    Return additional wait time based on topology scale.
+    Values derived from observed syncd bulk operation times on T1 testbeds:
+    - Single bulk ops: 10-30s each
+    - Full reload involves multiple sequential bulk ops
+    - Add safety margin for worst-case scenarios
+
+    Args:
+        sonic_host: SONiC host object
+        base_wait: Base wait time to add to
+
+    Returns:
+        Total wait time (base_wait + topology-specific additional time)
+    """
+    try:
+        device_type = sonic_host.facts.get('type', '').lower()
+        subtype = sonic_host.facts.get('subtype', '').lower()
+    except Exception:
+        device_type = ''
+        subtype = ''
+
+    # Scale factors based on OBSERVED timing data (seconds)
+    # T1 logs showed 30+s for single ops, multiple ops per reload
+    scale_factors = {
+        # T2 - largest scale: estimate 2-3x T1 times
+        'upperspinerouter': 300,       # T2 super-spine
+        'backendspinerouter': 240,     # T2 backend spine
+
+        # T1 - observed: SWITCH=30s, ROUTE=20s, NHG=25s
+        # Total: 60-90s for bulk ops alone, add margin
+        'spinerouter': 180,            # T1 spine
+        'leafrouter': 180,             # T1 leaf
+        'backendleafrouter': 120,      # T1 backend leaf
+
+        # DualToR / T0 - smaller scale
+        'torouter': 60,                # T0 ToR
+        'backendtorouter': 60,         # T0 backend ToR
+        'bmcmgmttorouter': 45,         # BMC mgmt ToR
+        'mgmttorouter': 45,            # Mgmt ToR
+
+        # Minimal topologies
+        'minits': 30,                  # Minimal test
+        'sonichost': 30,               # DPU/standalone
+        'router': 45,                  # Generic router
+    }
+
+    # Default 90s for unknown topology types
+    additional_wait = scale_factors.get(device_type, 90)
+
+    # DualToR: mux cable state sync adds time
+    if 'tor' in device_type and subtype == 'dualtor':
+        additional_wait += 30
+        logger.info("DualToR detected: adding 30s for mux state sync")
+
+    # SmartSwitch: DPU coordination adds significant time
+    if subtype == 'smartswitch':
+        additional_wait += 60
+        logger.info("SmartSwitch detected: adding 60s for DPU coordination")
+
+    logger.info(
+        "Topology '%s' (subtype '%s'): adding %ds for syncd ops",
+        device_type, subtype, additional_wait
+    )
+    return base_wait + additional_wait
+
+
+def _check_redis_responsive(sonic_host, timeout_sec=5):
+    """
+    Check if Redis can respond to commands (not blocked by Lua scripts).
+
+    Args:
+        sonic_host: SONiC host object
+        timeout_sec: Timeout for the PING command
+
+    Returns:
+        True if Redis responds within timeout, False otherwise
+    """
+    try:
+        result = sonic_host.shell(
+            "timeout {} redis-cli -n 4 PING".format(timeout_sec),
+            module_ignore_errors=True
+        )
+        return result['rc'] == 0 and 'PONG' in result.get('stdout', '')
+    except Exception as e:
+        logger.warning("Redis responsiveness check failed: %s", e)
+        return False
+
+
+def _wait_for_redis_ready(sonic_host, timeout=300, interval=10):
+    """
+    Wait until Redis is responsive (syncd bulk operations completed).
+
+    This prevents YANG validation from failing with 'BUSY Redis is busy
+    running a script' errors that occur when syncd is performing bulk
+    SAI operations via long-running Lua scripts.
+
+    Args:
+        sonic_host: SONiC host object
+        timeout: Maximum time to wait for Redis to be responsive
+        interval: Polling interval
+
+    Returns:
+        True if Redis became responsive, False if timeout reached
+    """
+    logger.info("Waiting for Redis to be responsive...")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        if _check_redis_responsive(sonic_host):
+            elapsed = time.time() - start_time
+            logger.info("Redis is responsive after %.1fs", elapsed)
+            return True
+        logger.debug("Redis still busy, waiting %ds...", interval)
+        time.sleep(interval)
+
+    logger.warning("Redis not responsive after %ds timeout", timeout)
+    return False
+
+
 def config_reload_minigraph_with_rendered_golden_config_override(
         sonic_host, wait=120, start_bgp=True, start_dynamic_buffer=True,
         safe_reload=False, wait_before_force_reload=0, wait_for_bgp=False,
@@ -354,6 +474,18 @@ def config_reload(sonic_host, config_source='config_db', wait=120, start_bgp=Tru
         sonic_host.shell("TSB")
 
     if yang_validate:
+        # Use topology-aware timeout for Redis readiness polling
+        # Larger topologies have more SAI objects requiring longer syncd time
+        # Returns early once Redis is responsive, avoiding unnecessary waits
+        topo_timeout = _get_topology_scale_wait_time(sonic_host)
+        logger.info("Waiting for Redis (timeout=%ds based on topology)", topo_timeout)
+
+        if not _wait_for_redis_ready(sonic_host, timeout=topo_timeout, interval=10):
+            logger.warning(
+                "Redis not responsive after %ds - YANG validation may fail",
+                topo_timeout
+            )
+
         pytest_assert(
             wait_until(120, 30, 0, sonic_host.yang_validate),
             "Yang validation failed after config_reload"
