@@ -7,6 +7,7 @@ from ipaddress import ip_interface
 from tests.common.utilities import wait_until
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.config_reload import config_reload
+from tests.common.helpers.redis_health import RedisHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +123,11 @@ class TestNeighborMacNoPtf:
         """
         duthost = duthosts[enum_rand_one_per_hwsku_frontend_hostname]
         if not duthost.get_facts().get("modular_chassis"):
-            duthost.command("sudo config bgp shutdown all")
-            if not wait_until(120, 2.0, 0, self._check_no_bgp_routes, duthost):
-                pytest.fail('BGP Shutdown Timeout: BGP route removal exceeded 120 seconds.')
+            # Monitor Redis health during BGP shutdown - bulk route removal can cause Redis BUSY errors
+            with RedisHealthMonitor(duthost, fail_on_busy=True, fail_on_restart=False):
+                duthost.command("sudo config bgp shutdown all")
+                if not wait_until(120, 2.0, 0, self._check_no_bgp_routes, duthost):
+                    pytest.fail('BGP Shutdown Timeout: BGP route removal exceeded 120 seconds.')
 
         yield
 
@@ -273,8 +276,12 @@ class TestNeighborMacNoPtf:
 
         yield
 
-        self.__updateNeighborIp(asichost, routedInterface, ipVersion, 1, action="del")
-        self.__updateInterfaceIp(asichost, routedInterface, ipVersion, action="remove")
+        # Monitor Redis health during teardown - this detects SAI/SDK bugs that cause Redis BUSY errors
+        # The RedisHealthMonitor will fail the test if BUSY errors are detected in syslog
+        # or if critical services restart due to Redis blocking
+        with RedisHealthMonitor(duthost, fail_on_busy=True, fail_on_restart=False) as monitor:
+            self.__updateNeighborIp(asichost, routedInterface, ipVersion, 1, action="del")
+            self.__updateInterfaceIp(asichost, routedInterface, ipVersion, action="remove")
 
     @pytest.fixture
     def arpTableMac(self, duthosts, enum_rand_one_per_hwsku_frontend_hostname,
