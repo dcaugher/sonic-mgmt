@@ -824,21 +824,85 @@ class SonicAsic(object):
         mapping = self.sonichost.get_crm_resources(self.namespace)
         return mapping.get(resource_type).get(route_tag, {}).get(count_type)
 
-    def count_routes(self, ROUTE_TABLE_NAME):
-        ns_prefix = ""
-        if self.sonichost.is_multi_asic:
-            ns_prefix = '-n ' + str(self.namespace)
-        return int(self.shell(
-            'sonic-db-cli {} ASIC_DB eval "return #redis.call(\'keys\', \'{}*\')" 0'
-            .format(ns_prefix, ROUTE_TABLE_NAME),
-            module_ignore_errors=True, verbose=True)['stdout'])
+    def count_routes(self, ROUTE_TABLE_NAME, max_retries=3, retry_interval=5):
+        """Count routes in ASIC_DB matching the given table name prefix.
 
-    def get_route_key(self, ROUTE_TABLE_NAME):
+        On T1/T2 topologies with many routes, the KEYS query inside eval can
+        block Redis for 10+ seconds. If Redis returns BUSY, this method waits
+        and retries up to max_retries times.
+
+        Args:
+            ROUTE_TABLE_NAME: The route table name prefix to count
+            max_retries: Maximum number of retry attempts on BUSY error
+            retry_interval: Seconds to wait between retries
+        """
+        import time
         ns_prefix = ""
         if self.sonichost.is_multi_asic:
             ns_prefix = '-n ' + str(self.namespace)
-        return self.shell('sonic-db-cli {} ASIC_DB eval "return redis.call(\'keys\', \'{}*\')" 0'
-                          .format(ns_prefix, ROUTE_TABLE_NAME), verbose=False)['stdout_lines']
+        cmd = 'sonic-db-cli {} ASIC_DB eval "return #redis.call(\'keys\', \'{}*\')" 0'.format(
+            ns_prefix, ROUTE_TABLE_NAME)
+
+        for attempt in range(max_retries + 1):
+            result = self.shell(cmd, module_ignore_errors=True, verbose=True)
+            stdout = result.get('stdout', '')
+            stderr = result.get('stderr', '')
+
+            # Check for BUSY Redis error
+            if 'BUSY' in stdout or 'BUSY' in stderr:
+                if attempt < max_retries:
+                    logger.warning("count_routes: Redis BUSY, waiting %ds before retry %d/%d",
+                                   retry_interval, attempt + 1, max_retries)
+                    time.sleep(retry_interval)
+                    continue
+                else:
+                    logger.error("count_routes: Redis still BUSY after %d retries", max_retries)
+                    raise RuntimeError("Redis BUSY error persists after {} retries".format(max_retries))
+
+            # Success - parse the count
+            try:
+                return int(stdout)
+            except (ValueError, TypeError) as e:
+                logger.error("count_routes: Failed to parse count from '%s': %s", stdout, e)
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+                    continue
+                raise
+
+        # Should not reach here, but just in case
+        return 0
+
+    def get_route_key(self, ROUTE_TABLE_NAME, max_retries=3, retry_interval=5):
+        """Get route keys from ASIC_DB matching the given table name prefix.
+
+        Includes retry logic for BUSY Redis errors on T1/T2 topologies.
+        """
+        import time
+        ns_prefix = ""
+        if self.sonichost.is_multi_asic:
+            ns_prefix = '-n ' + str(self.namespace)
+        cmd = 'sonic-db-cli {} ASIC_DB eval "return redis.call(\'keys\', \'{}*\')" 0'.format(
+            ns_prefix, ROUTE_TABLE_NAME)
+
+        for attempt in range(max_retries + 1):
+            result = self.shell(cmd, module_ignore_errors=True, verbose=False)
+            stdout = result.get('stdout', '')
+            stderr = result.get('stderr', '')
+
+            # Check for BUSY Redis error
+            if 'BUSY' in stdout or 'BUSY' in stderr:
+                if attempt < max_retries:
+                    logger.warning("get_route_key: Redis BUSY, waiting %ds before retry %d/%d",
+                                   retry_interval, attempt + 1, max_retries)
+                    time.sleep(retry_interval)
+                    continue
+                else:
+                    logger.error("get_route_key: Redis still BUSY after %d retries", max_retries)
+                    raise RuntimeError("Redis BUSY error persists after {} retries".format(max_retries))
+
+            return result.get('stdout_lines', [])
+
+        return []
 
     def show_and_parse(self, show_cmd, **kwargs):
         return self.sonichost.show_and_parse("{}{}".format(self.ns_arg, show_cmd), **kwargs)
