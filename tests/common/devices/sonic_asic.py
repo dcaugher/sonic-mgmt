@@ -4,6 +4,7 @@ import socket
 import re
 
 from tests.common.cache import cached
+from tests.common.config_reload import wait_for_redis_if_needed
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.helpers.cache_utils import sonic_asic_zone_getter
 from tests.common.helpers.constants import DEFAULT_NAMESPACE, NAMESPACE_PREFIX
@@ -560,25 +561,105 @@ class SonicAsic(object):
         return self.sonichost.shell("sudo config interface {ns} shutdown {intf}".
                                     format(ns=self.cli_ns_option, intf=interface_name))
 
-    def config_ip_intf(self, interface_name, ip_address, op):
-        return self.sonichost.shell("sudo config interface {ns} ip {op} {intf} {ip}"
-                                    .format(ns=self.cli_ns_option,
-                                            op=op,
-                                            intf=interface_name,
-                                            ip=ip_address))
+    def config_ip_intf(self, interface_name, ip_address, op, wait_for_redis=None):
+        """
+        Add or remove IP address on an interface.
 
-    def config_portchannel(self, pc_name, op):
-        return self.sonichost.shell("sudo config portchannel {ns} {op} {pc}"
-                                    .format(ns=self.cli_ns_option,
-                                            op=op,
-                                            pc=pc_name))
+        Args:
+            interface_name: Name of the interface
+            ip_address: IP address with prefix (e.g., "10.0.0.1/24")
+            op: Operation - "add" or "remove"
+            wait_for_redis: Wait for Redis after operation completes.
+                None = auto (wait after "remove" on T1/T2 topologies)
+                True = always wait
+                False = never wait
 
-    def config_portchannel_member(self, pc_name, interface_name, op):
-        return self.sonichost.shell("sudo config portchannel {ns} member {op} {pc} {intf}"
-                                    .format(ns=self.cli_ns_option,
-                                            op=op,
-                                            pc=pc_name,
-                                            intf=interface_name))
+        Returns:
+            Shell command result
+        """
+        result = self.sonichost.shell("sudo config interface {ns} ip {op} {intf} {ip}"
+                                      .format(ns=self.cli_ns_option,
+                                              op=op,
+                                              intf=interface_name,
+                                              ip=ip_address))
+
+        # Determine if we should wait for Redis
+        should_wait = wait_for_redis
+        if should_wait is None:
+            # Auto: wait after remove ops (can trigger bulk SAI cleanup)
+            should_wait = (op.lower() == "remove")
+
+        if should_wait:
+            op_type = "heavy" if op.lower() == "remove" else "light"
+            wait_for_redis_if_needed(self.sonichost, operation=op_type)
+
+        return result
+
+    def config_portchannel(self, pc_name, op, wait_for_redis=None):
+        """
+        Add or delete a PortChannel.
+
+        Args:
+            pc_name: PortChannel name (e.g., "PortChannel001")
+            op: Operation - "add" or "del"
+            wait_for_redis: Wait for Redis after operation completes.
+                None = auto (wait after "del" on T1/T2 topologies)
+                True = always wait
+                False = never wait
+
+        Returns:
+            Shell command result
+        """
+        result = self.sonichost.shell("sudo config portchannel {ns} {op} {pc}"
+                                      .format(ns=self.cli_ns_option,
+                                              op=op,
+                                              pc=pc_name))
+
+        # Determine if we should wait for Redis
+        should_wait = wait_for_redis
+        if should_wait is None:
+            # Auto: wait after del ops (can trigger bulk SAI cleanup)
+            should_wait = (op.lower() == "del")
+
+        if should_wait:
+            op_type = "heavy" if op.lower() == "del" else "light"
+            wait_for_redis_if_needed(self.sonichost, operation=op_type)
+
+        return result
+
+    def config_portchannel_member(self, pc_name, interface_name, op, wait_for_redis=None):
+        """
+        Add or delete a PortChannel member.
+
+        Args:
+            pc_name: PortChannel name (e.g., "PortChannel001")
+            interface_name: Member interface name (e.g., "Ethernet0")
+            op: Operation - "add" or "del"
+            wait_for_redis: Wait for Redis after operation completes.
+                None = auto (wait after "del" on T1/T2 topologies)
+                True = always wait
+                False = never wait
+
+        Returns:
+            Shell command result
+        """
+        result = self.sonichost.shell("sudo config portchannel {ns} member {op} {pc} {intf}"
+                                      .format(ns=self.cli_ns_option,
+                                              op=op,
+                                              pc=pc_name,
+                                              intf=interface_name))
+
+        # Determine if we should wait for Redis
+        should_wait = wait_for_redis
+        if should_wait is None:
+            # Auto: wait after del ops (can trigger bulk SAI cleanup)
+            should_wait = (op.lower() == "del")
+
+        if should_wait:
+            op_type = "heavy" if op.lower() == "del" else "light"
+            wait_for_redis_if_needed(self.sonichost, operation=op_type)
+
+        return result
 
     def get_portchannel_members(self, pc_name):
         """

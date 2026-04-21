@@ -145,7 +145,7 @@ def _wait_for_smartswitch_dpu_states(sonic_host):
     logger.info("Smartswitch DPU state wait completed")
 
 
-def _get_topology_scale_wait_time(sonic_host, base_wait=0):
+def get_topology_scale_wait_time(sonic_host, base_wait=0):
     """
     Return additional wait time based on topology scale.
     Values derived from observed syncd bulk operation times on T1 testbeds:
@@ -161,8 +161,9 @@ def _get_topology_scale_wait_time(sonic_host, base_wait=0):
         Total wait time (base_wait + topology-specific additional time)
     """
     try:
-        device_type = sonic_host.facts.get('type', '').lower()
-        subtype = sonic_host.facts.get('subtype', '').lower()
+        # Facts use 'router_type' and 'router_subtype' (not 'type'/'subtype')
+        device_type = sonic_host.facts.get('router_type', '').lower()
+        subtype = sonic_host.facts.get('router_subtype', '').lower()
     except Exception:
         device_type = ''
         subtype = ''
@@ -212,7 +213,7 @@ def _get_topology_scale_wait_time(sonic_host, base_wait=0):
     return base_wait + additional_wait
 
 
-def _check_redis_responsive(sonic_host, timeout_sec=5):
+def check_redis_responsive(sonic_host, timeout_sec=5):
     """
     Check if Redis can respond to commands (not blocked by Lua scripts).
 
@@ -234,7 +235,7 @@ def _check_redis_responsive(sonic_host, timeout_sec=5):
         return False
 
 
-def _wait_for_redis_ready(sonic_host, timeout=300, interval=10):
+def wait_for_redis_ready(sonic_host, timeout=300, interval=10):
     """
     Wait until Redis is responsive (syncd bulk operations completed).
 
@@ -254,7 +255,7 @@ def _wait_for_redis_ready(sonic_host, timeout=300, interval=10):
     start_time = time.time()
 
     while time.time() - start_time < timeout:
-        if _check_redis_responsive(sonic_host):
+        if check_redis_responsive(sonic_host):
             elapsed = time.time() - start_time
             logger.info("Redis is responsive after %.1fs", elapsed)
             return True
@@ -263,6 +264,68 @@ def _wait_for_redis_ready(sonic_host, timeout=300, interval=10):
 
     logger.warning("Redis not responsive after %ds timeout", timeout)
     return False
+
+
+def wait_for_redis_if_needed(sonic_host, operation="heavy"):
+    """
+    Wait for Redis if the operation is likely to trigger blocking bulk SAI ops.
+
+    On T1/T2 topologies, certain operations (IP remove, portchannel delete)
+    trigger syncd bulk SAI operations that block Redis for 10-30+ seconds.
+    This helper checks if waiting is needed based on topology scale and
+    operation type, then polls Redis until responsive.
+
+    Args:
+        sonic_host: SONiC host object (duthost or sonichost)
+        operation: Type of operation - "heavy" (removes/deletes, default),
+                   "light" (adds), or "none" (skip wait)
+
+    Returns:
+        True if Redis is responsive (or wait not needed), False if timeout
+    """
+    if operation == "none":
+        return True
+
+    try:
+        # Facts use 'router_type' (not 'type')
+        device_type = sonic_host.facts.get('router_type', '').lower()
+    except Exception:
+        device_type = ''
+
+    # T1/T2/VoQ topologies are at risk for long Redis blocks
+    risky_types = {
+        'upperspinerouter', 'backendspinerouter',  # T2
+        'spinerouter', 'leafrouter', 'backendleafrouter',  # T1
+    }
+
+    # T0 and smaller topologies rarely hit this issue
+    safe_types = {
+        'torouter', 'backendtorouter', 'bmcmgmttorouter',
+        'mgmttorouter', 'minits', 'sonichost',
+    }
+
+    # Determine if wait is needed
+    if device_type in safe_types:
+        logger.debug(
+            "Topology '%s' is low-risk, skipping Redis wait", device_type
+        )
+        return True
+
+    if device_type not in risky_types and operation == "light":
+        logger.debug("Unknown topology + light op, skipping Redis wait")
+        return True
+
+    # Use shorter timeout for individual operations vs full config_reload
+    if operation == "heavy":
+        timeout = 60  # Single bulk op: observed 30s, add margin
+    else:
+        timeout = 30  # Light ops rarely block long
+
+    logger.info(
+        "Waiting for Redis after %s operation (topology=%s, timeout=%ds)",
+        operation, device_type, timeout
+    )
+    return wait_for_redis_ready(sonic_host, timeout=timeout, interval=5)
 
 
 def config_reload_minigraph_with_rendered_golden_config_override(
@@ -477,10 +540,10 @@ def config_reload(sonic_host, config_source='config_db', wait=120, start_bgp=Tru
         # Use topology-aware timeout for Redis readiness polling
         # Larger topologies have more SAI objects requiring longer syncd time
         # Returns early once Redis is responsive, avoiding unnecessary waits
-        topo_timeout = _get_topology_scale_wait_time(sonic_host)
+        topo_timeout = get_topology_scale_wait_time(sonic_host)
         logger.info("Waiting for Redis (timeout=%ds based on topology)", topo_timeout)
 
-        if not _wait_for_redis_ready(sonic_host, timeout=topo_timeout, interval=10):
+        if not wait_for_redis_ready(sonic_host, timeout=topo_timeout, interval=10):
             logger.warning(
                 "Redis not responsive after %ds - YANG validation may fail",
                 topo_timeout
