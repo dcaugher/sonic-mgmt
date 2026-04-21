@@ -15,7 +15,6 @@ routes are programmed into the forwarding plane (FIB). This test verifies:
 import pytest
 import logging
 import json
-import time
 
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.utilities import wait_until
@@ -200,56 +199,19 @@ def _check_no_stale_routes(duthost, bgp_neighbor_ips):
     return True
 
 
-def _get_asic_db_route_count(duthost, max_retries=3, retry_interval=5):
+def _get_asic_db_route_count(duthost):
     """Get route count from ASIC_DB.
 
-    Counts ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY keys across all namespaces.
+    Counts ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY keys across all ASICs.
+    Uses asic.count_routes() which implements non-blocking SCAN.
     Returns total count or None on failure.
-    Includes retry logic for BUSY Redis errors on T1/T2 topologies.
     """
-    total = 0
-    for namespace in (duthost.get_frontend_asic_namespace_list() or ['']):
-        if namespace:
-            cmd = ("sonic-db-cli -n {} ASIC_DB eval "
-                   "\"return #redis.call('keys','ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY:*')\" 0"
-                   ).format(namespace)
-        else:
-            cmd = ("sonic-db-cli ASIC_DB eval "
-                   "\"return #redis.call('keys','ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY:*')\" 0")
-
-        for attempt in range(max_retries + 1):
-            try:
-                result = duthost.shell(cmd, module_ignore_errors=True, verbose=False)
-                stdout = result.get('stdout', '')
-                stderr = result.get('stderr', '')
-
-                # Check for BUSY Redis error
-                if 'BUSY' in stdout or 'BUSY' in stderr:
-                    if attempt < max_retries:
-                        logger.warning("_get_asic_db_route_count: Redis BUSY in namespace '%s', "
-                                       "waiting %ds before retry %d/%d",
-                                       namespace, retry_interval, attempt + 1, max_retries)
-                        time.sleep(retry_interval)
-                        continue
-                    else:
-                        logger.error("_get_asic_db_route_count: Redis still BUSY after %d retries",
-                                     max_retries)
-                        return None
-
-                if result.get('rc', 1) != 0:
-                    logger.warning("Failed to query ASIC_DB routes in namespace '%s' (rc=%d)",
-                                   namespace, result.get('rc'))
-                    return None
-                total += int(stdout.strip())
-                break  # Success, move to next namespace
-
-            except Exception as e:
-                logger.warning("Failed to get ASIC_DB route count in namespace '%s': %s", namespace, e)
-                if attempt < max_retries:
-                    time.sleep(retry_interval)
-                    continue
-                return None
-    return total
+    try:
+        pattern = "ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY:"
+        return sum(asic.count_routes(pattern) for asic in duthost.asics)
+    except Exception as e:
+        logger.warning("Failed to get ASIC_DB route count: %s", e)
+        return None
 
 
 def _get_gr_restart_timer(duthost, bgp_neighbor_ips):

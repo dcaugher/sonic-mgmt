@@ -824,85 +824,136 @@ class SonicAsic(object):
         mapping = self.sonichost.get_crm_resources(self.namespace)
         return mapping.get(resource_type).get(route_tag, {}).get(count_type)
 
-    def count_routes(self, ROUTE_TABLE_NAME, max_retries=3, retry_interval=5):
-        """Count routes in ASIC_DB matching the given table name prefix.
+    def count_routes(self, pattern_prefix):
+        """Count keys in ASIC_DB matching the given pattern prefix.
 
-        On T1/T2 topologies with many routes, the KEYS query inside eval can
-        block Redis for 10+ seconds. If Redis returns BUSY, this method waits
-        and retries up to max_retries times.
+        Uses Redis SCAN instead of KEYS to avoid blocking Redis for 10-30s on
+        T1/T2 topologies with 6000+ routes. KEYS runs inside a Lua script that
+        blocks all Redis operations, causing BUSY errors that crash pmon, syncd,
+        orchagent, and other daemons.
+
+        SCAN is cursor-based and non-blocking - each iteration takes ~1ms,
+        allowing other Redis operations to interleave.
+
+        Note:
+            SCAN is not atomic. If routes are added/removed during iteration,
+            counts may be slightly inaccurate. For exact counts during route
+            churn, use count_routes_stable() which waits for convergence.
 
         Args:
-            ROUTE_TABLE_NAME: The route table name prefix to count
-            max_retries: Maximum number of retry attempts on BUSY error
-            retry_interval: Seconds to wait between retries
+            pattern_prefix: Key pattern prefix to match (without trailing *).
+                Examples:
+                - 'ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY' - all routes
+                - 'ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY:{"dest":"10.' - 10.x.x.x routes
+
+        Returns:
+            int: Number of matching keys in ASIC_DB.
         """
-        import time
         ns_prefix = ""
         if self.sonichost.is_multi_asic:
             ns_prefix = '-n ' + str(self.namespace)
-        cmd = 'sonic-db-cli {} ASIC_DB eval "return #redis.call(\'keys\', \'{}*\')" 0'.format(
-            ns_prefix, ROUTE_TABLE_NAME)
 
-        for attempt in range(max_retries + 1):
-            result = self.shell(cmd, module_ignore_errors=True, verbose=True)
-            stdout = result.get('stdout', '')
-            stderr = result.get('stderr', '')
+        count = 0
+        cursor = "0"
+        pattern = "{}*".format(pattern_prefix)
 
-            # Check for BUSY Redis error
-            if 'BUSY' in stdout or 'BUSY' in stderr:
-                if attempt < max_retries:
-                    logger.warning("count_routes: Redis BUSY, waiting %ds before retry %d/%d",
-                                   retry_interval, attempt + 1, max_retries)
-                    time.sleep(retry_interval)
-                    continue
-                else:
-                    logger.error("count_routes: Redis still BUSY after %d retries", max_retries)
-                    raise RuntimeError("Redis BUSY error persists after {} retries".format(max_retries))
-
-            # Success - parse the count
-            try:
-                return int(stdout)
-            except (ValueError, TypeError) as e:
-                logger.error("count_routes: Failed to parse count from '%s': %s", stdout, e)
-                if attempt < max_retries:
-                    time.sleep(retry_interval)
-                    continue
-                raise
-
-        # Should not reach here, but just in case
-        return 0
-
-    def get_route_key(self, ROUTE_TABLE_NAME, max_retries=3, retry_interval=5):
-        """Get route keys from ASIC_DB matching the given table name prefix.
-
-        Includes retry logic for BUSY Redis errors on T1/T2 topologies.
-        """
-        import time
-        ns_prefix = ""
-        if self.sonichost.is_multi_asic:
-            ns_prefix = '-n ' + str(self.namespace)
-        cmd = 'sonic-db-cli {} ASIC_DB eval "return redis.call(\'keys\', \'{}*\')" 0'.format(
-            ns_prefix, ROUTE_TABLE_NAME)
-
-        for attempt in range(max_retries + 1):
+        # SCAN iterates in batches; cursor "0" at end means complete
+        while True:
+            cmd = 'sonic-db-cli {} ASIC_DB SCAN {} MATCH "{}" COUNT 1000'.format(
+                ns_prefix, cursor, pattern)
             result = self.shell(cmd, module_ignore_errors=True, verbose=False)
-            stdout = result.get('stdout', '')
-            stderr = result.get('stderr', '')
+            lines = result.get('stdout_lines', [])
 
-            # Check for BUSY Redis error
-            if 'BUSY' in stdout or 'BUSY' in stderr:
-                if attempt < max_retries:
-                    logger.warning("get_route_key: Redis BUSY, waiting %ds before retry %d/%d",
-                                   retry_interval, attempt + 1, max_retries)
-                    time.sleep(retry_interval)
-                    continue
-                else:
-                    logger.error("get_route_key: Redis still BUSY after %d retries", max_retries)
-                    raise RuntimeError("Redis BUSY error persists after {} retries".format(max_retries))
+            if not lines:
+                logger.warning("count_routes: Empty SCAN result, breaking")
+                break
 
-            return result.get('stdout_lines', [])
+            # First line is next cursor, remaining lines are keys
+            cursor = lines[0]
+            count += len(lines) - 1  # Subtract 1 for cursor line
 
-        return []
+            if cursor == "0":
+                break
+
+        return count
+
+    def count_routes_stable(self, pattern_prefix, timeout=30, interval=2):
+        """Count keys in ASIC_DB after waiting for route table to stabilize.
+
+        Waits until two consecutive counts return the same value, indicating
+        route convergence. Use this instead of count_routes() when exact counts
+        are needed during or after route changes.
+
+        Args:
+            pattern_prefix: Key pattern prefix to match (without trailing *).
+            timeout: Maximum seconds to wait for stabilization (default: 30).
+            interval: Seconds between stability checks (default: 2).
+
+        Returns:
+            int: Stable count of matching keys.
+
+        Raises:
+            RuntimeError: If routes don't stabilize within timeout.
+        """
+        import time
+        start = time.time()
+        prev_count = -1
+
+        while time.time() - start < timeout:
+            count = self.count_routes(pattern_prefix)
+            if count == prev_count:
+                logger.info("count_routes_stable: Stable at %d after %.1fs",
+                            count, time.time() - start)
+                return count
+            prev_count = count
+            time.sleep(interval)
+
+        # Timeout - return last count with warning
+        logger.warning("count_routes_stable: Routes did not stabilize within %ds "
+                       "(last count: %d)", timeout, prev_count)
+        return prev_count
+
+    def get_route_key(self, pattern_prefix):
+        """Get keys from ASIC_DB matching the given pattern prefix.
+
+        Uses Redis SCAN instead of KEYS to avoid blocking Redis. See
+        count_routes() for detailed explanation of why SCAN is necessary.
+
+        Note:
+            SCAN is not atomic. Results may be incomplete if keys are
+            modified during iteration. For stable results, ensure route
+            table has converged before calling.
+
+        Args:
+            pattern_prefix: Key pattern prefix to match (without trailing *).
+
+        Returns:
+            list: List of matching key names from ASIC_DB.
+        """
+        ns_prefix = ""
+        if self.sonichost.is_multi_asic:
+            ns_prefix = '-n ' + str(self.namespace)
+
+        keys = []
+        cursor = "0"
+        pattern = "{}*".format(pattern_prefix)
+
+        while True:
+            cmd = 'sonic-db-cli {} ASIC_DB SCAN {} MATCH "{}" COUNT 1000'.format(
+                ns_prefix, cursor, pattern)
+            result = self.shell(cmd, module_ignore_errors=True, verbose=False)
+            lines = result.get('stdout_lines', [])
+
+            if not lines:
+                break
+
+            cursor = lines[0]
+            keys.extend(lines[1:])  # All lines after cursor are keys
+
+            if cursor == "0":
+                break
+
+        return keys
 
     def show_and_parse(self, show_cmd, **kwargs):
         return self.sonichost.show_and_parse("{}{}".format(self.ns_arg, show_cmd), **kwargs)

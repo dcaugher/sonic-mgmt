@@ -33,41 +33,14 @@ class TestNeighborMacNoPtf:
         6: {"intfIp": "fe00::1/64", "NeighborIp": "fe00::2"},
     }
 
-    def count_routes(self, asichost, prefix, max_retries=3, retry_interval=5):
-        """Counts routes in ASIC_DB with a given prefix.
+    def count_routes(self, asichost, prefix):
+        """Counts routes in ASIC_DB with a given dest prefix.
 
-        Includes retry logic for BUSY Redis errors on T1/T2 topologies.
+        Uses asichost.count_routes() which implements non-blocking SCAN.
         """
-        cmd = '{} ASIC_DB eval "return #redis.call(\'keys\', \'{}:{{\\"dest\\":\\"{}*\')" 0'.format(
-            asichost.sonic_db_cli, ROUTE_TABLE_NAME, prefix)
-
-        for attempt in range(max_retries + 1):
-            result = asichost.shell(cmd, module_ignore_errors=True, verbose=True)
-            stdout = result.get('stdout', '')
-            stderr = result.get('stderr', '')
-
-            # Check for BUSY Redis error
-            if 'BUSY' in stdout or 'BUSY' in stderr:
-                if attempt < max_retries:
-                    logger.warning("count_routes: Redis BUSY, waiting %ds before retry %d/%d",
-                                   retry_interval, attempt + 1, max_retries)
-                    time.sleep(retry_interval)
-                    continue
-                else:
-                    logger.error("count_routes: Redis still BUSY after %d retries", max_retries)
-                    raise RuntimeError("Redis BUSY error persists after {} retries".format(max_retries))
-
-            # Success - parse the count
-            try:
-                return int(stdout)
-            except (ValueError, TypeError) as e:
-                logger.error("count_routes: Failed to parse count from '%s': %s", stdout, e)
-                if attempt < max_retries:
-                    time.sleep(retry_interval)
-                    continue
-                raise
-
-        return 0
+        # Pattern: ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY:{"dest":"<prefix>
+        pattern = '{}:{{"dest":"{}'.format(ROUTE_TABLE_NAME, prefix)
+        return asichost.count_routes(pattern)
 
     def _get_back_plane_port_ips(self, duthost):
         port_config = json.loads(duthost.shell("show runningconfiguration port",
