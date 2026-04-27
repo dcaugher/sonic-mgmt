@@ -23,6 +23,18 @@ FILE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "files")
 # Enable detailed PFC debugging instrumentation
 PFC_DEBUG_ENABLED = True
 
+# Cache for platform type to avoid repeated lookups
+_platform_cache = {}
+
+
+def _is_cisco_8000(duthost):
+    """Check if DUT is cisco-8000 platform. Results are cached."""
+    hostname = duthost.hostname
+    if hostname not in _platform_cache:
+        _platform_cache[hostname] = duthost.facts.get('asic_type', '').lower() == 'cisco-8000'
+    return _platform_cache[hostname]
+
+
 pytestmark = [
     pytest.mark.disable_loganalyzer,
     pytest.mark.topology('any')
@@ -134,10 +146,14 @@ def _debug_verify_fanout_pfc_gen(storm_hndle):
                 logger.warning(f"Failed to get fanout PFC counters: {e}")
 
 
-def _debug_collect_platform_specific_diag(duthost):
+def _debug_collect_platform_specific_diag(duthost, test_ports=None):
     """
     Collect platform-specific PFC diagnostics.
     Helps identify Root Cause #4: Platform-specific behavior.
+    
+    Args:
+        duthost: DUT host instance
+        test_ports: Optional list of test ports for detailed per-port analysis
     """
     if not PFC_DEBUG_ENABLED:
         return
@@ -178,16 +194,174 @@ def _debug_collect_platform_specific_diag(duthost):
         logger.warning(f"Failed to get per-port PFC_WD config: {e}")
     
     # Cisco-8000 specific diagnostics
-    if asic_type == 'cisco-8000':
-        logger.info("Collecting Cisco-8000 specific diagnostics...")
+    if _is_cisco_8000(duthost):
+        _debug_collect_cisco_8000_diag(duthost, test_ports)
+
+
+def _debug_collect_cisco_8000_diag(duthost, test_ports=None):
+    """
+    Cisco-8000 specific diagnostics for PFC/PFCWD issues.
+    
+    Investigates:
+    - QoS map differences between port types (AZURE vs AZURE_UPLINK)
+    - Per-port tc_to_queue_map assignment
+    - Mux cable state (for dualtor topology)
+    - PFCWD flex counter status per queue
+    - SAI-level PFC events
+    
+    Args:
+        duthost: DUT host instance
+        test_ports: Optional list of test ports to analyze
+    """
+    logger.info("=== DEBUG [Cisco-8000]: Collecting platform-specific diagnostics ===")
+    
+    # 1. Check QoS MAP configurations (AZURE vs AZURE_UPLINK)
+    logger.info("--- QoS Map Configurations ---")
+    try:
+        # Get all TC_TO_QUEUE_MAP entries
+        result = duthost.shell(
+            "sonic-db-cli CONFIG_DB KEYS 'TC_TO_QUEUE_MAP|*'",
+            module_ignore_errors=True)
+        qos_maps = result.get('stdout', '').strip().split('\n')
+        for qos_map in qos_maps:
+            if qos_map:
+                result = duthost.shell(
+                    f"sonic-db-cli CONFIG_DB HGETALL '{qos_map}'",
+                    module_ignore_errors=True)
+                logger.info(f"{qos_map}: {result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get TC_TO_QUEUE_MAP: {e}")
+    
+    # 2. Check per-port QoS map assignment (this reveals AZURE vs AZURE_UPLINK per port)
+    logger.info("--- Per-Port QoS Map Assignment ---")
+    sample_ports = test_ports[:6] if test_ports and len(test_ports) > 6 else (test_ports or [])
+    # Also include a couple of known uplink ports for comparison
+    uplink_sample = ['Ethernet224', 'Ethernet232']
+    all_sample_ports = list(set(sample_ports + uplink_sample))
+    
+    port_qos_info = {}
+    for port in sorted(all_sample_ports):
         try:
             result = duthost.shell(
-                r"docker exec syncd grep -i 'pfc\|storm' /var/log/swss/sairedis.rec 2>/dev/null | tail -20",
+                f"sonic-db-cli CONFIG_DB HGET 'PORT_QOS_MAP|{port}' 'tc_to_queue_map'",
                 module_ignore_errors=True)
-            if result.get('stdout'):
-                logger.info(f"SAI Redis PFC events:\n{result.get('stdout')}")
+            tc_map = result.get('stdout', '').strip()
+            
+            result = duthost.shell(
+                f"sonic-db-cli CONFIG_DB HGET 'PORT_QOS_MAP|{port}' 'pfc_to_queue_map'",
+                module_ignore_errors=True)
+            pfc_map = result.get('stdout', '').strip()
+            
+            port_qos_info[port] = {'tc_to_queue_map': tc_map, 'pfc_to_queue_map': pfc_map}
+            logger.info(f"  {port}: tc_to_queue={tc_map}, pfc_to_queue={pfc_map}")
         except Exception as e:
-            logger.warning(f"Failed to get SAI Redis logs: {e}")
+            logger.warning(f"Failed to get QoS map for {port}: {e}")
+    
+    # 3. Check mux cable state (critical for dualtor topology)
+    logger.info("--- Mux Cable State ---")
+    try:
+        result = duthost.shell("show mux status", module_ignore_errors=True)
+        if result.get('rc') == 0:
+            logger.info(f"Mux status:\n{result.get('stdout', 'N/A')}")
+        else:
+            logger.info("Mux cable not configured (non-dualtor topology)")
+    except Exception as e:
+        logger.warning(f"Failed to get mux status: {e}")
+    
+    # 4. Check MUX_CABLE table for port classification
+    logger.info("--- MUX_CABLE Configuration (server-facing port identification) ---")
+    try:
+        result = duthost.shell(
+            "sonic-db-cli CONFIG_DB KEYS 'MUX_CABLE|*' | head -10",
+            module_ignore_errors=True)
+        mux_ports = result.get('stdout', '').strip().split('\n')
+        mux_port_list = [p.replace('MUX_CABLE|', '') for p in mux_ports if p]
+        logger.info(f"MUX_CABLE ports (server-facing): {mux_port_list[:10]}...")
+        
+        # Classify test ports
+        if test_ports:
+            mux_test_ports = [p for p in test_ports if p in mux_port_list]
+            non_mux_test_ports = [p for p in test_ports if p not in mux_port_list]
+            logger.info(f"Test ports classification:")
+            logger.info(f"  Server-facing (mux): {len(mux_test_ports)} ports - {sorted(mux_test_ports)[:5]}...")
+            logger.info(f"  Uplink (non-mux): {len(non_mux_test_ports)} ports - {sorted(non_mux_test_ports)}")
+    except Exception as e:
+        logger.warning(f"Failed to get MUX_CABLE config: {e}")
+    
+    # 5. Check PFCWD flex counter status - are counters being polled for all queues?
+    logger.info("--- PFCWD Flex Counter Queue Status ---")
+    try:
+        # Check if PFCWD counters are enabled
+        result = duthost.shell(
+            "sonic-db-cli FLEX_COUNTER_DB KEYS 'FLEX_COUNTER_TABLE:PFC_WD:*' | wc -l",
+            module_ignore_errors=True)
+        counter_count = result.get('stdout', '').strip()
+        logger.info(f"Total PFCWD flex counter entries: {counter_count}")
+        
+        # Sample a few entries to see which queue OIDs are being monitored
+        result = duthost.shell(
+            "sonic-db-cli FLEX_COUNTER_DB KEYS 'FLEX_COUNTER_TABLE:PFC_WD:*' | head -5",
+            module_ignore_errors=True)
+        sample_keys = result.get('stdout', '').strip().split('\n')
+        for key in sample_keys[:3]:
+            if key:
+                result = duthost.shell(
+                    f"sonic-db-cli FLEX_COUNTER_DB HGETALL '{key}'",
+                    module_ignore_errors=True)
+                logger.info(f"  {key}: {result.get('stdout', 'N/A')[:100]}...")
+    except Exception as e:
+        logger.warning(f"Failed to get PFCWD flex counter status: {e}")
+    
+    # 6. Check COUNTERS_DB for actual PFC WD queue counters
+    logger.info("--- PFCWD Queue Counter OIDs (sample) ---")
+    try:
+        # Get a sample port's queue OID to verify counters exist
+        sample_port = test_ports[0] if test_ports else 'Ethernet8'
+        result = duthost.shell(
+            f"sonic-db-cli COUNTERS_DB HGET COUNTERS_PORT_NAME_MAP {sample_port}",
+            module_ignore_errors=True)
+        port_oid = result.get('stdout', '').strip()
+        logger.info(f"Port {sample_port} OID: {port_oid}")
+        
+        if port_oid:
+            # Check queue counters for this port
+            result = duthost.shell(
+                f"sonic-db-cli COUNTERS_DB KEYS 'COUNTERS:oid:*' | grep -c '' || echo 0",
+                module_ignore_errors=True)
+            logger.info(f"Total COUNTERS entries: {result.get('stdout', '').strip()}")
+    except Exception as e:
+        logger.warning(f"Failed to get queue counter OIDs: {e}")
+    
+    # 7. Check SAI Redis logs for PFC-related events
+    logger.info("--- SAI Redis PFC Events ---")
+    try:
+        result = duthost.shell(
+            r"docker exec syncd grep -iE 'pfc|storm|watchdog|queue.*pause' "
+            r"/var/log/swss/sairedis.rec 2>/dev/null | tail -30",
+            module_ignore_errors=True)
+        if result.get('stdout'):
+            logger.info(f"SAI Redis PFC events:\n{result.get('stdout')}")
+        else:
+            logger.info("No PFC-related SAI events found in recent logs")
+    except Exception as e:
+        logger.warning(f"Failed to get SAI Redis logs: {e}")
+    
+    # 8. Check PFC priority enable status per port
+    logger.info("--- PFC Priority Enable Status ---")
+    try:
+        for port in all_sample_ports[:4]:
+            result = duthost.shell(
+                f"sonic-db-cli CONFIG_DB HGET 'PORT|{port}' 'pfc_asym'",
+                module_ignore_errors=True)
+            pfc_asym = result.get('stdout', '').strip() or 'not set'
+            
+            result = duthost.shell(
+                f"sonic-db-cli APPL_DB HGET 'PORT_TABLE:{port}' 'pfc_enable'",
+                module_ignore_errors=True)
+            pfc_enable = result.get('stdout', '').strip() or 'not set'
+            logger.info(f"  {port}: pfc_asym={pfc_asym}, pfc_enable={pfc_enable}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFC enable status: {e}")
 
 
 def _debug_poll_storm_timing(duthost, storm_hndle, test_ports, queue_idx, timeout_sec=60):
@@ -273,7 +447,7 @@ def _debug_collect_all_diagnostics(duthost, storm_hndle, test_ports, label, is_f
     if is_failure:
         _debug_collect_port_health(duthost, test_ports)
         _debug_verify_fanout_pfc_gen(storm_hndle)
-        _debug_collect_platform_specific_diag(duthost)
+        _debug_collect_platform_specific_diag(duthost, test_ports)
 
 
 @pytest.fixture(scope="class")
