@@ -576,7 +576,7 @@ def _prepare_background_traffic_params(duthost, queues, selected_test_ports, tes
                   'src_ips': src_ips,
                   'dst_ips': dst_ips,
                   'queues': queues,
-                  'bidirection': False,
+                  'bidirection': True,
                   'pkt_count': pkt_count}
 
     return ptf_params
