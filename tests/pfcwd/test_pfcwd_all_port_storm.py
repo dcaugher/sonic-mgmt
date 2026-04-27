@@ -538,20 +538,26 @@ class TestPfcwdAllPortStorm(object):
         # Track which ports actually enter storm state
         stormed_ports_list = []
 
-        # get all the tested ports
+        # get all the tested ports from ALL fanouts
+        # BUG FIX: Previously the loop would overwrite fanout_intfs/device_conn each iteration,
+        # causing only the LAST fanout's ports to be tested. Now we accumulate across all peers.
         queues = []
+        selected_test_ports = []
+
         for peer in storm_hndle.peer_params.keys():
             fanout_intfs = storm_hndle.peer_params[peer]['intfs'].split(',')
             device_conn = storm_hndle.fanout_graph[peer]['device_conn']
             queues.append(storm_hndle.storm_handle[peer].pfc_queue_idx)
-        queues = list(set(queues))
-        selected_test_ports = []
 
-        if duthost.facts['asic_type'] != 'vs':
-            for intf in fanout_intfs:
-                test_port = device_conn[intf]['peerport']
-                if test_port in setup_pfc_test['test_ports']:
-                    selected_test_ports.append(test_port)
+            # Accumulate test ports from this fanout (moved INSIDE the loop)
+            if duthost.facts['asic_type'] != 'vs':
+                for intf in fanout_intfs:
+                    test_port = device_conn[intf]['peerport']
+                    if test_port in setup_pfc_test['test_ports'] and test_port not in selected_test_ports:
+                        selected_test_ports.append(test_port)
+
+        queues = list(set(queues))
+        logger.info(f"Testing {len(selected_test_ports)} ports from {len(storm_hndle.peer_params)} fanouts: {sorted(selected_test_ports)}")
         resolve_arp(duthost, ptfhost, setup_pfc_test['test_ports'],
                     setup_pfc_test["vlan"], setup_pfc_test["ip_version"])
         with send_background_traffic(duthost, ptfhost, queues, selected_test_ports, setup_pfc_test['test_ports'],
