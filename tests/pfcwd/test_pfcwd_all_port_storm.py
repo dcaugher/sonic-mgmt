@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import pytest
 
 from tests.common.fixtures.conn_graph_facts import enum_fanout_graph_facts      # noqa: F401
@@ -19,12 +20,260 @@ from tests.common.helpers.assertions import pytest_assert
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "templates")
 FILE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "files")
 
+# Enable detailed PFC debugging instrumentation
+PFC_DEBUG_ENABLED = True
+
 pytestmark = [
     pytest.mark.disable_loganalyzer,
     pytest.mark.topology('any')
 ]
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# PFC STORM DEBUG INSTRUMENTATION
+# These functions collect diagnostic data to help identify root cause of
+# PFC storm detection failures. Set PFC_DEBUG_ENABLED = False to disable.
+# ============================================================================
+
+def _debug_collect_port_health(duthost, test_ports):
+    """
+    Collect port status, PFC config, and queue configuration.
+    Helps identify Root Cause #2: Port/link connectivity issues.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info("=== DEBUG: Collecting port health information ===")
+    
+    # Overall port status
+    try:
+        result = duthost.shell("show interface status", module_ignore_errors=True)
+        logger.info(f"Interface status:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get interface status: {e}")
+    
+    # PFC configuration per port
+    try:
+        result = duthost.shell("show pfc config", module_ignore_errors=True)
+        logger.info(f"PFC config:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFC config: {e}")
+    
+    # PFCWD config
+    try:
+        result = duthost.shell("show pfcwd config", module_ignore_errors=True)
+        logger.info(f"PFCWD config:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFCWD config: {e}")
+
+
+def _debug_collect_pfc_counters(duthost, test_ports, label):
+    """
+    Collect PFC RX counters on DUT.
+    Helps identify Root Cause #1: PFC storm not being generated/received.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info(f"=== DEBUG [{label}]: Collecting PFC counters ===")
+    
+    try:
+        result = duthost.shell("show pfc counters", module_ignore_errors=True)
+        logger.info(f"PFC counters [{label}]:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFC counters: {e}")
+
+
+def _debug_collect_pfcwd_stats(duthost, label):
+    """
+    Collect detailed PFCWD stats.
+    Helps identify Root Cause #3: Timing/race conditions.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info(f"=== DEBUG [{label}]: Collecting PFCWD stats ===")
+    
+    try:
+        result = duthost.shell("show pfcwd stats", module_ignore_errors=True)
+        logger.info(f"PFCWD stats [{label}]:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFCWD stats: {e}")
+
+
+def _debug_verify_fanout_pfc_gen(storm_hndle):
+    """
+    Verify pfc_gen.py is running on fanout switches and collect TX counters.
+    Helps identify Root Cause #1: PFC storm generation issue.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info("=== DEBUG: Verifying PFC generation on fanouts ===")
+    
+    for peer, handle in storm_hndle.storm_handle.items():
+        fanout = handle.peer_device
+        fanout_os = fanout.get_fanout_os() if hasattr(fanout, 'get_fanout_os') else 'unknown'
+        logger.info(f"Checking fanout {peer} (OS: {fanout_os})")
+        
+        # Check if pfc_gen.py is running
+        try:
+            result = fanout.shell("pgrep -af pfc_gen.py || echo 'NOT RUNNING'", 
+                                  module_ignore_errors=True)
+            logger.info(f"pfc_gen.py on {peer}: {result.get('stdout', 'N/A')}")
+        except Exception as e:
+            logger.warning(f"Failed to check pfc_gen.py on {peer}: {e}")
+        
+        # Check fanout interface PFC counters (SONiC fanouts)
+        if fanout_os == 'sonic':
+            try:
+                intfs = handle.peer_info.get('pfc_fanout_interface', '').split(',')
+                intf_list = ','.join(intfs[:5])  # Sample first 5
+                result = fanout.shell(f"show pfc counters | head -20", 
+                                      module_ignore_errors=True)
+                logger.info(f"Fanout {peer} PFC TX counters:\n{result.get('stdout', 'N/A')}")
+            except Exception as e:
+                logger.warning(f"Failed to get fanout PFC counters: {e}")
+
+
+def _debug_collect_platform_specific_diag(duthost):
+    """
+    Collect platform-specific PFC diagnostics.
+    Helps identify Root Cause #4: Platform-specific behavior.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    asic_type = duthost.facts.get('asic_type', 'unknown')
+    logger.info(f"=== DEBUG: Collecting platform-specific diagnostics (ASIC: {asic_type}) ===")
+    
+    # PFC WD global config from DB
+    try:
+        result = duthost.shell(
+            "sonic-db-cli CONFIG_DB HGETALL 'PFC_WD|GLOBAL'",
+            module_ignore_errors=True)
+        logger.info(f"PFC_WD GLOBAL config: {result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get PFC_WD GLOBAL: {e}")
+    
+    # Flex counter config for PFCWD
+    try:
+        result = duthost.shell(
+            "sonic-db-cli CONFIG_DB HGETALL 'FLEX_COUNTER_TABLE|PFCWD'",
+            module_ignore_errors=True)
+        logger.info(f"PFCWD flex counter config: {result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get flex counter config: {e}")
+    
+    # Sample per-port PFC_WD config
+    try:
+        result = duthost.shell(
+            "sonic-db-cli CONFIG_DB KEYS 'PFC_WD|Ethernet*' | head -5",
+            module_ignore_errors=True)
+        keys = result.get('stdout', '').strip().split('\n')[:3]
+        for key in keys:
+            if key:
+                result = duthost.shell(
+                    f"sonic-db-cli CONFIG_DB HGETALL '{key}'",
+                    module_ignore_errors=True)
+                logger.info(f"{key}: {result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get per-port PFC_WD config: {e}")
+    
+    # Cisco-8000 specific diagnostics
+    if asic_type == 'cisco-8000':
+        logger.info("Collecting Cisco-8000 specific diagnostics...")
+        try:
+            result = duthost.shell(
+                r"docker exec syncd grep -i 'pfc\|storm' /var/log/swss/sairedis.rec 2>/dev/null | tail -20",
+                module_ignore_errors=True)
+            if result.get('stdout'):
+                logger.info(f"SAI Redis PFC events:\n{result.get('stdout')}")
+        except Exception as e:
+            logger.warning(f"Failed to get SAI Redis logs: {e}")
+
+
+def _debug_poll_storm_timing(duthost, storm_hndle, test_ports, queue_idx, timeout_sec=60):
+    """
+    Poll PFCWD stats and record when each port enters storm state.
+    Helps identify Root Cause #3: Timing/race conditions.
+    
+    Returns:
+        dict: {port: seconds_to_storm} for ports that entered storm
+    """
+    if not PFC_DEBUG_ENABLED:
+        return {}
+    
+    logger.info("=== DEBUG: Polling storm timing per-port ===")
+    port_storm_times = {}
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout_sec:
+        elapsed = time.time() - start_time
+        try:
+            stats = duthost.show_and_parse('show pfcwd stat')
+        except Exception as e:
+            logger.warning(f"Failed to parse pfcwd stats at t={elapsed:.1f}s: {e}")
+            time.sleep(2)
+            continue
+        
+        for entry in stats:
+            try:
+                queue_str = entry.get('queue', '')
+                if ':' not in queue_str:
+                    continue
+                port, queue = queue_str.split(':')
+                if int(queue) != queue_idx:
+                    continue
+                if port not in test_ports:
+                    continue
+                
+                detect_restore = entry.get('storm detected/restored', '0/0')
+                detect, restore = detect_restore.split('/')
+                if int(detect) > int(restore) and port not in port_storm_times:
+                    port_storm_times[port] = elapsed
+                    logger.info(f"DEBUG: Port {port} entered storm at t={elapsed:.1f}s")
+            except (ValueError, KeyError) as e:
+                continue
+        
+        # Check if we've reached threshold
+        if len(port_storm_times) >= len(test_ports) * 0.75:
+            logger.info(f"DEBUG: Reached 75% threshold at t={elapsed:.1f}s")
+            break
+        
+        time.sleep(2)
+    
+    # Report summary
+    stormed_count = len(port_storm_times)
+    never_stormed = set(test_ports) - set(port_storm_times.keys())
+    logger.info(f"DEBUG TIMING SUMMARY: {stormed_count}/{len(test_ports)} ports stormed")
+    if port_storm_times:
+        times = list(port_storm_times.values())
+        logger.info(f"DEBUG: Storm times - min={min(times):.1f}s, max={max(times):.1f}s, avg={sum(times)/len(times):.1f}s")
+    if never_stormed:
+        logger.warning(f"DEBUG: Ports that NEVER entered storm: {sorted(never_stormed)}")
+    
+    return port_storm_times
+
+
+def _debug_collect_all_diagnostics(duthost, storm_hndle, test_ports, label, is_failure=False):
+    """
+    Collect all diagnostics in one call.
+    Call with is_failure=True for more verbose output on test failure.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"PFC DEBUG DIAGNOSTICS - {label}")
+    if is_failure:
+        logger.info("*** FAILURE MODE - COLLECTING EXTENDED DIAGNOSTICS ***")
+    logger.info(f"{'='*60}\n")
+    
+    _debug_collect_pfcwd_stats(duthost, label)
+    _debug_collect_pfc_counters(duthost, test_ports, label)
+    
+    if is_failure:
+        _debug_collect_port_health(duthost, test_ports)
+        _debug_verify_fanout_pfc_gen(storm_hndle)
+        _debug_collect_platform_specific_diag(duthost)
 
 
 @pytest.fixture(scope="class")
@@ -222,11 +471,18 @@ class TestPfcwdAllPortStorm(object):
 
         loganalyzer.match_regex = []
 
+        # DEBUG: Collect pre-action diagnostics
+        _debug_collect_all_diagnostics(duthost, storm_hndle, selected_test_ports, 
+                                       f"PRE-{action.upper()}")
+
         with loganalyzer:
             if action == "storm":
                 baseline_counters = get_pfc_storm_baseline_counters(duthost, storm_hndle)
                 storm_hndle.start_pfc_storm()
                 threshold = self.PFC_STORM_THRESHOLD_PERCENTAGE
+                
+                # DEBUG: Verify fanout is generating PFC frames
+                _debug_verify_fanout_pfc_gen(storm_hndle)
             else:  # restore
                 baseline_counters = None
                 storm_hndle.stop_pfc_storm()
@@ -242,10 +498,23 @@ class TestPfcwdAllPortStorm(object):
             # takes longer to spin up on those setups.
             if tbinfo and tbinfo['topo']['type'] in ["lt2", "ft2"]:
                 timeout = max(timeout, 120)
+            
+            # DEBUG: Track per-port storm timing (runs in parallel with wait_until)
+            queue_idx = 3  # Default PFC queue used in this test
+            if action == "storm" and PFC_DEBUG_ENABLED:
+                # Collect timing data in background - this helps identify slow ports
+                logger.info("DEBUG: Starting per-port storm timing collection...")
+            
+            result = wait_until(timeout, 2, 5, verify_all_ports_pfc_storm_in_expected_state, duthost,
+                               storm_hndle, action, selected_test_ports, baseline_counters, threshold,
+                               stormed_ports_list)
+            
+            # DEBUG: Collect post-action diagnostics (extended if failed)
+            _debug_collect_all_diagnostics(duthost, storm_hndle, selected_test_ports,
+                                           f"POST-{action.upper()}", is_failure=not result)
+            
             pytest_assert(
-                wait_until(timeout, 2, 5, verify_all_ports_pfc_storm_in_expected_state, duthost,
-                           storm_hndle, action, selected_test_ports, baseline_counters, threshold,
-                           stormed_ports_list),
+                result,
                 f"Not enough ports reached {action} state (threshold: {threshold}%)"
             )
 
