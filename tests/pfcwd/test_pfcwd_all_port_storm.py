@@ -427,6 +427,96 @@ def _debug_poll_storm_timing(duthost, storm_hndle, test_ports, queue_idx, timeou
     return port_storm_times
 
 
+def _debug_collect_interface_counters(duthost, test_ports):
+    """
+    Collect interface counters to verify traffic is reaching ports.
+    Helps identify Root Cause: Traffic not being routed to server ports.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info("=== DEBUG: Interface Counters (TX_OK/RX_OK) ===")
+    
+    try:
+        result = duthost.shell("show interfaces counters -a", module_ignore_errors=True)
+        output = result.get('stdout', '')
+        logger.info(f"Full interface counters:\n{output}")
+        
+        # Parse and summarize counters for test ports
+        lines = output.strip().split('\n')
+        header_found = False
+        port_stats = {}
+        for line in lines:
+            if 'IFACE' in line and 'TX_OK' in line:
+                header_found = True
+                continue
+            if header_found and line.strip():
+                parts = line.split()
+                if len(parts) >= 5:
+                    iface = parts[0]
+                    if iface in test_ports:
+                        port_stats[iface] = {
+                            'rx_ok': parts[2] if len(parts) > 2 else 'N/A',
+                            'tx_ok': parts[6] if len(parts) > 6 else 'N/A'
+                        }
+        
+        logger.info("=== Test Port Counter Summary ===")
+        for port in sorted(test_ports)[:10]:
+            stats = port_stats.get(port, {'rx_ok': 'N/A', 'tx_ok': 'N/A'})
+            logger.info(f"  {port}: RX_OK={stats['rx_ok']}, TX_OK={stats['tx_ok']}")
+        
+        # Count ports with no TX traffic (potential problem)
+        zero_tx_ports = [p for p, s in port_stats.items() if s.get('tx_ok') in ('0', 'N/A', '')]
+        if zero_tx_ports:
+            logger.warning(f"ALERT: {len(zero_tx_ports)} ports have ZERO TX: {sorted(zero_tx_ports)[:10]}...")
+    except Exception as e:
+        logger.warning(f"Failed to get interface counters: {e}")
+
+
+def _debug_collect_routing_info(duthost, test_ports, traffic_params=None):
+    """
+    Collect routing information to verify traffic can reach server ports.
+    Checks routes to server IPs to verify they point to expected interfaces.
+    """
+    if not PFC_DEBUG_ENABLED:
+        return
+    logger.info("=== DEBUG: Routing Information ===")
+    
+    # Check VLAN membership for server ports
+    try:
+        result = duthost.shell("show vlan brief", module_ignore_errors=True)
+        logger.info(f"VLAN membership:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get VLAN info: {e}")
+    
+    # Check routes to sample server IPs
+    sample_server_ips = ['192.168.0.2', '192.168.0.3', '192.168.0.10', '192.168.0.20']
+    logger.info("=== Routes to sample server IPs ===")
+    for ip in sample_server_ips:
+        try:
+            result = duthost.shell(f"ip route get {ip} 2>/dev/null || echo 'Route not found'",
+                                   module_ignore_errors=True)
+            route = result.get('stdout', '').strip().split('\n')[0]
+            logger.info(f"  {ip}: {route}")
+        except Exception as e:
+            logger.warning(f"Failed to get route for {ip}: {e}")
+    
+    # Check neighbor table for server MACs
+    logger.info("=== Neighbor (ARP) table for VLAN ===")
+    try:
+        result = duthost.shell("ip neigh show dev Vlan1000 | head -10", module_ignore_errors=True)
+        logger.info(f"VLAN1000 neighbors:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get neighbor table: {e}")
+    
+    # Check if server IPs are locally connected via VLAN
+    logger.info("=== VLAN interface config ===")
+    try:
+        result = duthost.shell("show ip interface | grep -E 'Vlan|Interface'", module_ignore_errors=True)
+        logger.info(f"IP interfaces:\n{result.get('stdout', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Failed to get IP interface info: {e}")
+
+
 def _debug_collect_all_diagnostics(duthost, storm_hndle, test_ports, label, is_failure=False):
     """
     Collect all diagnostics in one call.
@@ -446,6 +536,8 @@ def _debug_collect_all_diagnostics(duthost, storm_hndle, test_ports, label, is_f
     
     if is_failure:
         _debug_collect_port_health(duthost, test_ports)
+        _debug_collect_interface_counters(duthost, test_ports)
+        _debug_collect_routing_info(duthost, test_ports)
         _debug_verify_fanout_pfc_gen(storm_hndle)
         _debug_collect_platform_specific_diag(duthost, test_ports)
 
@@ -734,8 +826,19 @@ class TestPfcwdAllPortStorm(object):
         logger.info(f"Testing {len(selected_test_ports)} ports from {len(storm_hndle.peer_params)} fanouts: {sorted(selected_test_ports)}")
         resolve_arp(duthost, ptfhost, setup_pfc_test['test_ports'],
                     setup_pfc_test["vlan"], setup_pfc_test["ip_version"])
+        
+        # Use higher pkt_count for topologies where traffic is spread across many ports.
+        # In dualtor topology, all server ports share ONE rx_port_id (the uplink), so forward
+        # traffic from the uplink is split across all server destinations. With the original
+        # pkt_count=500, each server port only receives ~500/num_servers packets, which may
+        # not be sufficient to keep the queue occupied when PFC pause frames arrive.
+        # Increase to 5000 to ensure ~200+ packets per server port per iteration.
+        effective_pkt_count = 5000 if len(selected_test_ports) > 8 else 500
+        logger.info(f"Using pkt_count={effective_pkt_count} for {len(selected_test_ports)} ports "
+                    f"(~{effective_pkt_count // max(1, len(selected_test_ports) - 4)} pkts/server)")
+        
         with send_background_traffic(duthost, ptfhost, queues, selected_test_ports, setup_pfc_test['test_ports'],
-                                     pkt_count=500):
+                                     pkt_count=effective_pkt_count):
             self.run_test(duthost,
                           storm_hndle,
                           expect_regex=[EXPECT_PFC_WD_DETECT_RE + fetch_vendor_specific_diagnosis_re(duthost)],
