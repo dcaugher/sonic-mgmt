@@ -4,7 +4,7 @@ Tests for the `counterpoll queue/watermark/pg-drop ...` commands in SONiC
 
 import allure
 import logging
-import random
+# import random  # TODO(MIGSOFTWAR-39421): Commented out while debugging with hardcoded values
 import time
 import pytest
 
@@ -60,16 +60,130 @@ def dut_vars(duthosts, enum_rand_one_per_hwsku_frontend_hostname, request):
     yield dut_vars
 
 
-def get_keys_on_asics(duthost, db_id, key):
-    # will throw a SonicDbKeyNotFound exception if the key is not in the DB
-    return {asic.asic_index: SonicDbCli(asic, db_id).get_keys(key) for asic in duthost.asics}
+def get_keys_on_asics(duthost, db_id, key, raise_error_when_not_found=True):
+    """
+    Get keys matching a pattern from all ASICs.
+    Args:
+        duthost: DUT host object
+        db_id: Database ID (e.g., "COUNTERS_DB")
+        key: Key pattern to search for
+        raise_error_when_not_found: If True, raises SonicDbKeyNotFound when no keys found
+    Returns:
+        Dict mapping asic_index to list of keys found
+    """
+    result = {}
+    for asic in duthost.asics:
+        try:
+            result[asic.asic_index] = SonicDbCli(asic, db_id).get_keys(key, raise_error_when_not_found)
+        except SonicDbKeyNotFound:
+            if raise_error_when_not_found:
+                raise
+            result[asic.asic_index] = []
+    return result
+
+
+def log_port_initialization_state(duthost):
+    """
+    Log the current state of port initialization for debugging.
+    This helps identify if ports are fully initialized when counterpoll is enabled.
+    """
+    logging.info("=" * 60)
+    logging.info("PORT INITIALIZATION STATE DEBUG")
+    logging.info("=" * 60)
+
+    # Check interface status
+    try:
+        intf_status = duthost.show_and_parse('show interfaces status')
+        oper_up_count = sum(1 for intf in intf_status if intf.get('oper', '').lower() == 'up')
+        logging.info("Interfaces status: %d total, %d oper up", len(intf_status), oper_up_count)
+        # Log first few interfaces as sample
+        for intf in intf_status[:5]:
+            logging.info("  Interface sample: %s", intf)
+    except Exception as e:
+        logging.warning("Failed to get interface status: %s", e)
+
+    # Check swss container status
+    try:
+        result = duthost.shell('docker ps --filter name=swss --format "{{.Status}}"', module_ignore_errors=True)
+        logging.info("swss container status: %s", result.get('stdout', 'unknown'))
+    except Exception as e:
+        logging.warning("Failed to get swss status: %s", e)
+
+    # Check orchagent process
+    try:
+        result = duthost.shell('pgrep -a orchagent', module_ignore_errors=True)
+        logging.info("orchagent process: %s", result.get('stdout', 'not found'))
+    except Exception as e:
+        logging.warning("Failed to get orchagent status: %s", e)
+
+    logging.info("=" * 60)
+
+
+def log_counters_db_maps_state(duthost, context_msg=""):
+    """
+    Log the current state of COUNTERS_DB MAP tables for debugging.
+    """
+    logging.info("=" * 60)
+    logging.info("COUNTERS_DB MAPS STATE DEBUG %s", context_msg)
+    logging.info("=" * 60)
+
+    map_patterns = [
+        'COUNTERS_PG_NAME_MAP',
+        'COUNTERS_PG_INDEX_MAP',
+        'COUNTERS_PG_PORT_MAP',
+        'COUNTERS_QUEUE_NAME_MAP',
+        'COUNTERS_PORT_NAME_MAP',
+    ]
+
+    for pattern in map_patterns:
+        try:
+            keys = get_keys_on_asics(duthost, 'COUNTERS_DB', pattern, raise_error_when_not_found=False)
+            for asic_idx, key_list in keys.items():
+                if key_list:
+                    logging.info("  [asic%d] %s: EXISTS (%d keys)", asic_idx, pattern, len(key_list))
+                    # For NAME_MAP, also get the content to see if it has entries
+                    if 'NAME_MAP' in pattern:
+                        try:
+                            for asic in duthost.asics:
+                                if asic.asic_index == asic_idx:
+                                    content = asic.run_sonic_db_cli_cmd('COUNTERS_DB HGETALL {}'.format(pattern))
+                                    lines = content.get('stdout_lines', [])
+                                    logging.info("    Content has %d entries", len(lines) // 2 if lines else 0)
+                                    # Log first few entries as sample
+                                    for line in lines[:6]:
+                                        logging.info("      %s", line)
+                                    break
+                        except Exception as e:
+                            logging.warning("    Failed to get content: %s", e)
+                else:
+                    logging.info("  [asic%d] %s: EMPTY/NOT FOUND", asic_idx, pattern)
+        except Exception as e:
+            logging.warning("  %s: ERROR - %s", pattern, e)
+
+    # Also check the wildcard pattern used by the test
+    try:
+        wildcard_keys = get_keys_on_asics(duthost, 'COUNTERS_DB', 'COUNTERS_*_*_MAP', raise_error_when_not_found=False)
+        for asic_idx, key_list in wildcard_keys.items():
+            logging.info("  [asic%d] COUNTERS_*_*_MAP wildcard: %d keys found", asic_idx, len(key_list))
+            for key in key_list:
+                logging.info("    - %s", key)
+    except Exception as e:
+        logging.warning("  Wildcard pattern check failed: %s", e)
+
+    logging.info("=" * 60)
 
 
 def check_counters_populated(duthost, key):
     try:
-        keys = get_keys_on_asics(duthost, "COUNTERS_DB", key)
-        return bool(keys.values())
+        keys = get_keys_on_asics(duthost, "COUNTERS_DB", key, raise_error_when_not_found=True)
+        populated = bool(keys.values())
+        # Add debug logging for each check
+        for asic_idx, key_list in keys.items():
+            logging.debug("check_counters_populated: asic%d key='%s' found %d keys",
+                         asic_idx, key, len(key_list) if key_list else 0)
+        return populated
     except SonicDbKeyNotFound:
+        logging.debug("check_counters_populated: key='%s' not found (SonicDbKeyNotFound)", key)
         return False
 
 
@@ -97,7 +211,16 @@ def test_counterpoll_queue_watermark_pg_drop(duthosts, localhost, enum_rand_one_
     counted_dict = {}
     # choosing only one between reload / reboot due to test duration limitations
     with allure.step("choosing random config apply method"):
-        config_apply_method = random.choice(["config reload", "switch reboot"])
+        # TODO(MIGSOFTWAR-39421): Hardcoded for debugging - was random.choice(["config reload", "switch reboot"])
+        # config_apply_method = random.choice(["config reload", "switch reboot"])
+        config_apply_method = "config reload"
+        logging.info("DEBUG: Using hardcoded config_apply_method='%s' for MIGSOFTWAR-39421 investigation",
+                     config_apply_method)
+
+    # Log initial state before any changes
+    log_counters_db_maps_state(duthost, "[BEFORE disabling counterpolls]")
+    log_port_initialization_state(duthost)
+
     with allure.step("disabling all counterpolls"):
         for asic in duthost.asics:
             ConterpollHelper.disable_counterpoll(asic, list(CounterpollConstants.COUNTERPOLL_MAPPING.values()))
@@ -110,8 +233,16 @@ def test_counterpoll_queue_watermark_pg_drop(duthosts, localhost, enum_rand_one_
     with allure.step("saving config on dut {} after counterpoll disable...".format(duthost.hostname)):
         duthost.command('config save -y')
 
+    # Log state after disabling counterpolls and before reload
+    log_counters_db_maps_state(duthost, "[AFTER config save, BEFORE reload]")
+
     # choosing only one counterpoll to test due to test duration limitaions
-    tested_counterpoll = random.choice(RELEVANT_COUNTERPOLLS)
+    # TODO(MIGSOFTWAR-39421): Hardcoded for debugging - was random.choice(RELEVANT_COUNTERPOLLS)
+    # tested_counterpoll = random.choice(RELEVANT_COUNTERPOLLS)
+    tested_counterpoll = CounterpollConstants.PG_DROP
+    logging.info("DEBUG: Using hardcoded tested_counterpoll='%s' for MIGSOFTWAR-39421 investigation",
+                 tested_counterpoll)
+
     # need reload or reboot after disabling counterpolls to clean DB stats, this is by design
     with allure.step(config_apply_method + " dut {} ...".format(duthost.hostname)):
         if 'reload' in config_apply_method:
@@ -119,7 +250,14 @@ def test_counterpoll_queue_watermark_pg_drop(duthosts, localhost, enum_rand_one_
         elif 'reboot' in config_apply_method:
             reboot(duthost, localhost)
     # Sleep for 60 seconds to wait for config DB to be ready or else the next step will cause testcase failure
+    logging.info("DEBUG: Sleeping 60 seconds for config DB to be ready...")
     time.sleep(60)
+    logging.info("DEBUG: 60 second sleep completed")
+
+    # Log state after reload/reboot and sleep
+    log_counters_db_maps_state(duthost, "[AFTER {} + 60s sleep]".format(config_apply_method))
+    log_port_initialization_state(duthost)
+
     # verify all counterpolls are disabled after reload or reboot
     with allure.step("Verifying output of {} on {} after {} ..."
                      .format(CounterpollConstants.COUNTERPOLL_SHOW, duthost.hostname, config_apply_method)):
@@ -130,11 +268,46 @@ def test_counterpoll_queue_watermark_pg_drop(duthosts, localhost, enum_rand_one_
         for asic in duthost.asics:
             ConterpollHelper.enable_counterpoll(asic, [tested_counterpoll])
             verify_counterpoll_status(asic, [tested_counterpoll], ENABLE)
+
     # Delay to allow the counterpoll to generate the maps in COUNTERS_DB
+    # NOTE: Do NOT add logging between enable_counterpoll and wait_until - critical timing window
     with allure.step("waiting {} seconds for counterpoll to generate maps in COUNTERS_DB"):
         delay = RELEVANT_MAPS[tested_counterpoll][DELAY]
-        pytest_assert(wait_until(120, 5, delay, check_counters_populated, duthost, MAPS_LONG_PREFIX.format('*')),
-                      "COUNTERS_DB failed to populate")
+        logging.info("DEBUG: Starting wait_until(timeout=120, interval=5, delay=%d) for key pattern '%s'",
+                     delay, MAPS_LONG_PREFIX.format('*'))
+        logging.info("DEBUG: Waiting %d seconds (delay) before first DB check to let orchagent process...",
+                     delay)
+
+        result = wait_until(120, 5, delay, check_counters_populated, duthost, MAPS_LONG_PREFIX.format('*'))
+
+        # Log state after the wait (whether success or failure)
+        log_counters_db_maps_state(duthost, "[AFTER wait_until, result={}]".format(result))
+        log_port_initialization_state(duthost)
+
+        if not result:
+            # Additional diagnostics on failure
+            logging.error("COUNTERS_DB failed to populate! Collecting additional diagnostics...")
+
+            # Check FLEX_COUNTER_DB state
+            try:
+                flex_keys = get_keys_on_asics(duthost, 'FLEX_COUNTER_DB', '*PG*', raise_error_when_not_found=False)
+                for asic_idx, key_list in flex_keys.items():
+                    logging.error("FLEX_COUNTER_DB *PG* keys on asic%d: %d found", asic_idx, len(key_list))
+                    for key in key_list[:10]:
+                        logging.error("  - %s", key)
+            except Exception as e:
+                logging.error("Failed to get FLEX_COUNTER_DB keys: %s", e)
+
+            # Check CONFIG_DB FLEX_COUNTER_TABLE
+            try:
+                for asic in duthost.asics:
+                    cfg_result = asic.run_sonic_db_cli_cmd('CONFIG_DB keys *FLEX_COUNTER*')
+                    logging.error("CONFIG_DB FLEX_COUNTER keys on asic%d: %s",
+                                 asic.asic_index, cfg_result.get('stdout', 'none'))
+            except Exception as e:
+                logging.error("Failed to get CONFIG_DB FLEX_COUNTER keys: %s", e)
+
+        pytest_assert(result, "COUNTERS_DB failed to populate")
     # verify QUEUE or PG maps are generated into COUNTERS_DB after enabling relevant counterpoll
     with allure.step("Verifying MAPS in COUNTERS_DB on {}...".format(duthost.hostname)):
         maps_dict = RELEVANT_MAPS[tested_counterpoll]
