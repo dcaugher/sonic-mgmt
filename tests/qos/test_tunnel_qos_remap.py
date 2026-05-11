@@ -3,6 +3,7 @@ import pytest
 import time
 from ptf.mask import Mask
 import ptf.packet as scapy
+from tests.common import cisco_data
 from tests.common.fixtures.ptfhost_utils import copy_ptftests_directory   # noqa: F401
 from tests.common.fixtures.ptfhost_utils import copy_saitests_directory   # noqa: F401
 from tests.common.fixtures.ptfhost_utils import change_mac_addresses      # noqa: F401
@@ -113,7 +114,7 @@ def test_encap_dscp_rewrite(ptfhost, upper_tor_host, lower_tor_host,  # noqa: F8
     ]
     dualtor_meta = dualtor_info(
         ptfhost, upper_tor_host, lower_tor_host, tbinfo)
-    if "cisco-8000" in ptfhost.duthost.facts["asic_type"]:
+    if ptfhost.duthost.facts["asic_type"] == cisco_data.ASIC_TYPE:
         DSCP_COMBINATIONS = list(tunnel_qos_maps['inner_dscp_to_outer_dscp_map'].items())
         for dscp_combination in REQUIRED_DSCP_COMBINATIONS:
             assert dscp_combination in DSCP_COMBINATIONS, \
@@ -396,7 +397,7 @@ def test_pfc_pause_extra_lossless_standby(ptfhost, fanouthosts, rand_selected_du
     4. Verify lossless traffic are paused
     """
     setup_info = setup_pfc_test
-    if "cisco-8000" in dut_config["asic_type"]:
+    if dut_config["asic_type"] == cisco_data.ASIC_TYPE:
         pytest.skip("Replacing test with test_pfc_watermark_extra_lossless_standby for Cisco-8000.")
     TEST_DATA = {
         # Inner DSCP, Outer DSCP, Priority
@@ -477,7 +478,7 @@ def test_pfc_pause_extra_lossless_active(ptfhost, fanouthosts, rand_selected_dut
     4. Verify lossless traffic are paused
     """
     setup_info = setup_pfc_test
-    if "cisco-8000" in dut_config["asic_type"]:
+    if dut_config["asic_type"] == cisco_data.ASIC_TYPE:
         pytest.skip("Replacing test with test_pfc_watermark_extra_lossless_active for Cisco-8000.")
     TEST_DATA = {
         # Inner DSCP, Outer DSCP, Priority, Queue
@@ -581,7 +582,7 @@ def test_pfc_watermark_extra_lossless_standby(ptfhost, fanouthosts, rand_selecte
     failures = []
     for inner_dscp, outer_dscp, prio, queue in TEST_DATA:
         wmk_stat_queue = queue
-        if "cisco-8000" in dut_config["asic_type"]:
+        if dut_config["asic_type"] == cisco_data.ASIC_TYPE:
             wmk_stat_queue = inner_dscp
         pkt, exp_pkt = build_testing_packet(src_ip=DUMMY_IP,
                                             dst_ip=SERVER_IP,
@@ -767,7 +768,7 @@ def test_tunnel_decap_dscp_to_pg_mapping(rand_selected_dut,
         cell_size = 208
     elif 'spc' in asic:
         cell_size = 144
-    elif dut_config["asic_type"] == "cisco-8000":
+    elif dut_config["asic_type"] == cisco_data.ASIC_TYPE:
         cell_size = 384
         packet_size = 1350
     else:

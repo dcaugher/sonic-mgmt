@@ -24,6 +24,7 @@ from tests.common.fixtures.ptfhost_utils import change_mac_addresses            
 from tests.common.fixtures.ptfhost_utils import ptf_portmap_file                            # noqa: F401
 from tests.common.fixtures.ptfhost_utils import iptables_drop_ipv6_tx                       # noqa: F401
 from tests.common.dualtor.dual_tor_utils import dualtor_ports                             # noqa: F401
+from tests.common import cisco_data
 from .qos_sai_base import QosSaiBase
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class TestQosProbe(QosSaiBase):
         if "pkts_num_egr_mem" in list(qosConfig.keys()):
             testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) == "cisco-8000" \
+        if dutTestParams["basicParams"].get("platform_asic", None) == cisco_data.ASIC_TYPE \
                 and not get_src_dst_asic_and_duts["src_long_link"] and get_src_dst_asic_and_duts["dst_long_link"]:
             if "pkts_num_egr_mem_short_long" in list(qosConfig.keys()):
                 testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem_short_long"]
@@ -246,7 +247,7 @@ class TestQosProbe(QosSaiBase):
         if "pkts_num_egr_mem" in list(qosConfig.keys()):
             testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) == "cisco-8000" \
+        if dutTestParams["basicParams"].get("platform_asic", None) == cisco_data.ASIC_TYPE \
                 and not get_src_dst_asic_and_duts["src_long_link"] and get_src_dst_asic_and_duts["dst_long_link"]:
             if "pkts_num_egr_mem_short_long" in list(qosConfig.keys()):
                 testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem_short_long"]

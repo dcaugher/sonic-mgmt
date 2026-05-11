@@ -17,7 +17,10 @@ from tests.common.helpers.assertions import pytest_assert, pytest_require
 from tests.common.helpers.counterpoll_helper import ConterpollHelper
 from tests.common.helpers.multi_thread_utils import SafeThreadPoolExecutor
 from tests.common.mellanox_data import is_mellanox_device as isMellanoxDevice
-from tests.common.cisco_data import is_cisco_device, copy_dshell_script_cisco_8000, run_dshell_command
+from tests.common.cisco_data import (
+    ASIC_TYPE as CISCO_ASIC_TYPE, SEPARATED_DSCP_TC_HWSKUS,
+    is_cisco_device, copy_dshell_script_cisco_8000, run_dshell_command
+)
 from tests.common.dualtor.dual_tor_common import active_standby_ports  # noqa: F401
 from tests.common.dualtor.dual_tor_utils import (upper_tor_host,  # noqa: F401
                                                  lower_tor_host, dualtor_ports, is_tunnel_qos_remap_enabled)
@@ -1082,7 +1085,7 @@ class QosSaiBase(QosBase):
             elif len(dst_test_port_ids) >= 4:
                 dstPorts = [0, 2, 3]
                 if (get_src_dst_asic_and_duts["src_asic"].sonichost.facts["asic_type"]
-                        in ['cisco-8000']):
+                        == CISCO_ASIC_TYPE):
                     dstPorts = [2, 3, 4]
             elif len(dst_test_port_ids) == 3:
                 dstPorts = [0, 2, 2]
@@ -1109,7 +1112,7 @@ class QosSaiBase(QosBase):
                         break
 
         if (get_src_dst_asic_and_duts["src_asic"].sonichost.facts["hwsku"]
-                in ["Cisco-8101-O8C48", "Cisco-8101-O8V48", "Cisco-8102-28FH-DPU-O-T1", "Cisco-8102-28FH-DPU-O"]):
+                in SEPARATED_DSCP_TC_HWSKUS):
             srcPorts = [testPortIds[0][0].index(uplinkPortIds[0])]
             dstPorts = [testPortIds[0][0].index(x) for x in uplinkPortIds[1:4]]
             logging.debug("Test Port dst:{}, src:{}".format(dstPorts, srcPorts))
@@ -1401,8 +1404,7 @@ class QosSaiBase(QosBase):
                     if (use_separated_upkink_dscp_tc_map or
                         (get_src_dst_asic_and_duts["src_asic"]
                          .sonichost.facts["hwsku"]
-                         in ["Cisco-8101-O8C48", "Cisco-8101-O8V48",
-                             "Cisco-8102-28FH-DPU-O-T1", "Cisco-8102-28FH-DPU-O"]) or is_supported_per_dir):
+                         in SEPARATED_DSCP_TC_HWSKUS) or is_supported_per_dir):
                         neighName = src_mgFacts["minigraph_neighbors"].get(portName, {}).get("name", "").lower()
                         if 't0' in neighName:
                             downlinkPortIds.append(portIndex)
@@ -3085,7 +3087,7 @@ class QosSaiBase(QosBase):
                         entry['original_ip'])
                       )
 
-        if dutTestParams["basicParams"]["sonic_asic_type"] != "cisco-8000":
+        if dutTestParams["basicParams"]["sonic_asic_type"] != CISCO_ASIC_TYPE:
             pytest.skip("Traffic sanity test is not supported")
 
         if dutTestParams["topo"] != "ptf64":
@@ -3666,7 +3668,7 @@ def set_shaper_rate(interface, pir=5_000_000_000, ifpir=5_000_000_000):
         dst_asic = get_src_dst_asic_and_duts['dst_asic']
         dst_index = dst_asic.asic_index
 
-        if dst_dut.facts['asic_type'] != "cisco-8000":
+        if dst_dut.facts['asic_type'] != CISCO_ASIC_TYPE:
             yield
             return
 
@@ -3890,7 +3892,7 @@ def clear_pg_watermark(interface):
         src_asic = get_src_dst_asic_and_duts['src_asic']
         src_index = src_asic.asic_index
 
-        if src_dut.facts['asic_type'] != "cisco-8000" or dutConfig["dutAsic"] != "gr2":
+        if src_dut.facts['asic_type'] != CISCO_ASIC_TYPE or dutConfig["dutAsic"] != "gr2":
             yield
             return
 

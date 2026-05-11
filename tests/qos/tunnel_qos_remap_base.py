@@ -8,6 +8,7 @@ import time
 import ptf.packet as scapy
 from ptf.mask import Mask
 from ptf.testutils import simple_tcp_packet, simple_ipv4ip_packet
+from tests.common import cisco_data
 from tests.common.dualtor.dual_tor_utils import mux_cable_server_ip
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.system_utils import docker
@@ -152,7 +153,7 @@ def tunnel_qos_maps(rand_selected_dut, dut_qos_maps_module):  # noqa: F811
     UPLINK_MAP_NAME = "AZURE_UPLINK"
     MAP_NAME = "AZURE"
     asic_type = rand_selected_dut.facts["asic_type"]
-    if 'cisco-8000' in asic_type:
+    if asic_type == cisco_data.ASIC_TYPE:
         # Cisco-8000 does not use the tunneled tc to pg map
         tc_to_pg_map_name = MAP_NAME
         # Use config DB for maps
@@ -177,7 +178,7 @@ def tunnel_qos_maps(rand_selected_dut, dut_qos_maps_module):  # noqa: F811
                 maps['TC_TO_PRIORITY_GROUP_MAP'][tc_to_pg_map_name][v])
     # inner_dscp_to_outer_dscp_map, a map for rewriting DSCP in the encapsulated packets
     ret['inner_dscp_to_outer_dscp_map'] = {}
-    if 'cisco-8000' in asic_type:
+    if asic_type == cisco_data.ASIC_TYPE:
         dscps_present = []
         for k, v in list(maps['TC_TO_DSCP_MAP'][TUNNEL_MAP_NAME].items()):
             ret['inner_dscp_to_outer_dscp_map'][int(k)] = int(v)
@@ -308,7 +309,7 @@ def qos_config(rand_selected_dut, tbinfo, dut_config):
 
     speed_cable_to_params = qos_configs['qos_params'][dut_asic][dut_topo]
     # Parameter autogeneration
-    if vendor == "cisco-8000":
+    if vendor == cisco_data.ASIC_TYPE:
         buffer_config = dutBufferConfig(duthost)
         qpm = QosParamCisco(speed_cable_to_params,
                             duthost, dut_asic, dut_topo, buffer_config, speed_cable)

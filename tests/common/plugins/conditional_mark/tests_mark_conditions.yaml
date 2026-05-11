@@ -804,6 +804,14 @@ copp/test_copp.py::TestCOPP::test_trap_neighbor_miss:
       - "(asic_type in ['broadcom'] and release in ['202411'])"
       - "(topo_name not in ['t0', 't0-64', 't0-52', 't0-116', 't0-118', 't0-88-o8c80', 't0-isolated-d16u16s1', 't0-isolated-d32u32s2'])"
 
+copp/:
+  xfail:
+    reason: "COPP tests not yet validated on GR2X platforms"
+    conditions_logical_operator: or
+    conditions:
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2X_PLATFORM_PREFIX'])"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and hwsku.startswith(constants['GR2X_HWSKU_PREFIX'])"
+
 #######################################
 #####            crm              #####
 #######################################
@@ -3972,6 +3980,12 @@ pfcwd:
       - "topo_type in ['bmc', 'm0', 'm1', 'mx']"
       - *lossyTopos
       - "release in ['202412']"
+  xfail:
+    reason: "PFCWD tests not yet validated on GR2X platforms"
+    conditions_logical_operator: or
+    conditions:
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2X_PLATFORM_PREFIX'])"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and hwsku.startswith(constants['GR2X_HWSKU_PREFIX'])"
 
 pfcwd/test_pfc_config.py::TestPfcConfig::test_forward_action_cfg:
    skip:
@@ -4267,7 +4281,7 @@ qos/test_qos_dscp_mapping.py:
     reason: "ECN marking in combination with tunnel decap not yet supported. Test is also skipped on KVM since it is run in nightly."
     conditions_logical_operator: or
     conditions:
-      - "asic_type in ['cisco-8000'] and platform.startswith('x86_64-8122_')"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
       - "asic_type in ['vs']"
 
 qos/test_qos_dscp_mapping.py::TestQoSSaiDSCPQueueMapping_IPIP_Base::test_dscp_to_queue_mapping[pipe:
@@ -4422,7 +4436,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiDwrr:
     reason: "Skip DWRR test on Cisco G200 platform."
     conditions_logical_operator: or
     conditions:
-      - "asic_type in ['cisco-8000'] and platform.startswith('x86_64-8122_')"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
 
 qos/test_qos_sai.py::TestQosSai::testQosSaiDwrrWeightChange:
   skip:
@@ -4432,7 +4446,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiDwrrWeightChange:
       - "asic_type in ['mellanox']"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
-      - "asic_type in ['cisco-8000'] and platform.startswith('x86_64-8122_')"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
 
 qos/test_qos_sai.py::TestQosSai::testQosSaiFullMeshTrafficSanity:
   skip:
@@ -4474,7 +4488,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiLosslessVoq:
     reason: "Unsupported testbed type."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['cisco-8000'] or platform.startswith('x86_64-8122_') or platform.startswith('x86_64-8223_')"
+      - "asic_type != constants['CISCO_ASIC_TYPE'] or platform.startswith(constants['GR2_PLATFORM_PREFIX']) or platform.startswith(constants['P200_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4483,7 +4497,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiLossyQueueVoq:
     reason: "Unsupported testbed type."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['cisco-8000'] or platform.startswith('x86_64-8122_') or platform.startswith('x86_64-8223_')"
+      - "asic_type != constants['CISCO_ASIC_TYPE'] or platform.startswith(constants['GR2_PLATFORM_PREFIX']) or platform.startswith(constants['P200_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4492,7 +4506,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiLossyQueueVoqMultiSrc:
     reason: "Unsupported testbed type."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['cisco-8000'] or platform.startswith('x86_64-8122_') or platform.startswith('x86_64-8223_')"
+      - "asic_type != constants['CISCO_ASIC_TYPE'] or platform.startswith(constants['GR2_PLATFORM_PREFIX']) or platform.startswith(constants['P200_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4501,7 +4515,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiPGDrop:
     reason: "Unsupported testbed type."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['cisco-8000'] or platform.startswith('x86_64-8122_')"
+      - "asic_type != constants['CISCO_ASIC_TYPE'] or platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4511,7 +4525,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiPgHeadroomWatermark:
     conditions_logical_operator: or
     conditions:
       - "asic_type in ['marvell-teralynx'] and platform in ['x86_64-wistron_6512_32r-r0', 'x86_64-wistron_sw_to3200k-r0']"
-      - "asic_type in ['cisco-8000'] and not platform.startswith('x86_64-8122_')"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and not platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4541,7 +4555,7 @@ qos/test_qos_sai.py::TestQosSai::testQosSaiSharedReservationSize:
     reason: "Shared reservation size test is not supported."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['cisco-8000'] or platform.startswith('x86_64-8122_')"
+      - "asic_type != constants['CISCO_ASIC_TYPE'] or platform.startswith(constants['GR2_PLATFORM_PREFIX'])"
       - "topo_type in ['m0', 'mx', 'm1']"
       - "topo_name not in constants['QOS_SAI_TOPO'] and asic_type not in ['mellanox']"
 
@@ -4945,6 +4959,12 @@ snappi_tests:
     reason: "Snappi test only support on physical tgen testbed"
     conditions:
       - "asic_type in ['vs']"
+  xfail:
+    reason: "Snappi tests not yet validated on GR2X platforms"
+    conditions_logical_operator: or
+    conditions:
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and platform.startswith(constants['GR2X_PLATFORM_PREFIX'])"
+      - "asic_type == constants['CISCO_ASIC_TYPE'] and hwsku.startswith(constants['GR2X_HWSKU_PREFIX'])"
 
 snappi_tests/dash:
   skip:

@@ -15,6 +15,7 @@ import pytest
 from tests.common.testbed import TestbedInfo
 from .issue import check_issues
 from tests.common.utilities import get_duts_from_host_pattern
+from tests.common import cisco_data
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,17 @@ MARK_CONDITIONS_CONSTANTS = {
                      't1-backend', 't1-isolated-d128', 't1-isolated-d32',
                      't2', 't2_2lc_36p-masic', 't2_2lc_min_ports-masic',
                      'lt2-p32o64', 'lt2-o128', 'ft2-64', 't2_one_hwsku_min', 't2_one_hwsku_max', 't2-single-node-min',
-                     't2_single_node_max', 't2_single_node_max_64p', 'topo_t2_single_node_max_64p_v2']
+                     't2_single_node_max', 't2_single_node_max_64p', 'topo_t2_single_node_max_64p_v2'],
+    # Cisco 8000 platform constants
+    "CISCO_ASIC_TYPE": cisco_data.ASIC_TYPE,
+    "GR2_PLATFORM_PREFIX": cisco_data.GR2_PLATFORM_PREFIX,
+    "GR2X_PLATFORM_PREFIX": cisco_data.GR2X_PLATFORM_PREFIX,
+    "GR2_HWSKU_PREFIX": cisco_data.GR2_HWSKU_PREFIX,
+    "GR2X_HWSKU_PREFIX": cisco_data.GR2X_HWSKU_PREFIX,
+    "P200_PLATFORM_PREFIX": cisco_data.P200_PLATFORM_PREFIX,
+    "P200_HWSKU_PREFIX": cisco_data.P200_HWSKU_PREFIX,
+    "GR_PLATFORM_PREFIX": cisco_data.GR_PLATFORM_PREFIX,
+    "GB_PLATFORMS": cisco_data.GB_PLATFORMS,
 }
 
 

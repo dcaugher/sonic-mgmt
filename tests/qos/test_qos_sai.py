@@ -47,6 +47,7 @@ from tests.common.helpers.ptf_tests_helper import (downstream_links, upstream_li
                                                    fetch_test_logs_ptf)
 from tests.common.utilities import get_ipv4_loopback_ip
 from tests.common.helpers.base_helper import read_logs
+from tests.common import cisco_data
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ class TestQosSai(QosSaiBase):
         if "pkts_num_egr_mem" in list(qosConfig.keys()):
             testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) == "cisco-8000" \
+        if dutTestParams["basicParams"].get("platform_asic") == cisco_data.ASIC_TYPE \
                 and not get_src_dst_asic_and_duts["src_long_link"] and get_src_dst_asic_and_duts["dst_long_link"]:
             if "pkts_num_egr_mem_short_long" in list(qosConfig.keys()):
                 testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem_short_long"]
@@ -680,7 +681,7 @@ class TestQosSai(QosSaiBase):
         if "pkts_num_egr_mem" in list(qosConfig.keys()):
             testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) == "cisco-8000" \
+        if dutTestParams["basicParams"].get("platform_asic") == cisco_data.ASIC_TYPE \
                 and not get_src_dst_asic_and_duts["src_long_link"] and get_src_dst_asic_and_duts["dst_long_link"]:
             if "pkts_num_egr_mem_short_long" in list(qosConfig.keys()):
                 testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem_short_long"]
@@ -1130,7 +1131,7 @@ class TestQosSai(QosSaiBase):
                 RunAnsibleModuleFail if ptf test fails
         """
         disableTest = request.config.getoption("--disable_test")
-        if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' or \
+        if dutTestParams["basicParams"]["sonic_asic_type"] == cisco_data.ASIC_TYPE or \
                 ('platform_asic' in dutTestParams["basicParams"] and
                  dutTestParams["basicParams"]["platform_asic"] in ["broadcom-dnx", "marvell-teralynx"]):
             disableTest = False
@@ -1139,7 +1140,7 @@ class TestQosSai(QosSaiBase):
 
         portSpeedCableLength = dutQosConfig["portSpeedCableLength"]
         if "wm_buf_pool_lossless" in bufPool:
-            if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' and \
+            if dutTestParams["basicParams"]["sonic_asic_type"] == cisco_data.ASIC_TYPE and \
                     not get_src_dst_asic_and_duts['single_asic_test']:
                 dstPortSpeedCableLength = get_portspeed_cablelen(
                     get_src_dst_asic_and_duts['dst_asic'])
@@ -1290,13 +1291,13 @@ class TestQosSai(QosSaiBase):
         if "lossy_queue_voq_1" in LossyVoq:
             if ('modular_chassis' in get_src_dst_asic_and_duts['src_dut'].facts and
                     get_src_dst_asic_and_duts['src_dut'].facts["modular_chassis"]):
-                if get_src_dst_asic_and_duts['src_dut'].facts['platform'] != 'x86_64-88_lc0_36fh-r0':
+                if get_src_dst_asic_and_duts['src_dut'].facts['platform'] != cisco_data.LC_SPLIT_VOQ_PLATFORM:
                     pytest.skip("LossyQueueVoq: This test is skipped since cisco-8000 T2 "
                                 "doesn't support split-voq.")
         elif "lossy_queue_voq_2" in LossyVoq:
-            if get_src_dst_asic_and_duts['src_dut'].facts['platform'] == 'x86_64-88_lc0_36fh-r0':
-                pytest.skip("LossyQueueVoq: lossy_queue_voq_2 test is not applicable "
-                            "for x86_64-88_lc0_36fh-r0, with split-voq.")
+            if get_src_dst_asic_and_duts['src_dut'].facts['platform'] == cisco_data.LC_SPLIT_VOQ_PLATFORM:
+                pytest.skip(f"LossyQueueVoq: lossy_queue_voq_2 test is not applicable "
+                            f"for {cisco_data.LC_SPLIT_VOQ_PLATFORM}, with split-voq.")
             if not ('modular_chassis' in get_src_dst_asic_and_duts['src_dut'].facts and
                     get_src_dst_asic_and_duts['src_dut'].facts["modular_chassis"]):
                 pytest.skip("LossyQueueVoq: lossy_queue_voq_2 test is not applicable "
@@ -1676,8 +1677,7 @@ class TestQosSai(QosSaiBase):
             else:
                 qosConfig = dutQosConfig["param"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) \
-                == "cisco-8000":
+        if dutTestParams["basicParams"].get("platform_asic") == cisco_data.ASIC_TYPE:
             if not get_src_dst_asic_and_duts['single_asic_test']:
                 if pgProfile == "wm_pg_shared_lossy":
                     pytest.skip("The lossy test is not valid for multiAsic configuration.")
@@ -1690,8 +1690,7 @@ class TestQosSai(QosSaiBase):
                     "PGSharedWatermark: Lossy test is not applicable in "
                     "cisco-8000 Q100 platform.")
             if not get_src_dst_asic_and_duts['single_asic_test'] and \
-                dutTestParams["basicParams"].get("platform_asic", None) \
-                    == "cisco-8000":
+                    dutTestParams["basicParams"].get("platform_asic") == cisco_data.ASIC_TYPE:
                 pytest.skip(
                     "PGSharedWatermark: Lossy test is not applicable in "
                     "cisco-8000 multi_asic scenarios.")
@@ -1723,7 +1722,7 @@ class TestQosSai(QosSaiBase):
         if "pkts_num_egr_mem" in list(qosConfig.keys()):
             testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem"]
 
-        if dutTestParams["basicParams"].get("platform_asic", None) == "cisco-8000" \
+        if dutTestParams["basicParams"].get("platform_asic") == cisco_data.ASIC_TYPE \
                 and not get_src_dst_asic_and_duts["src_long_link"] and get_src_dst_asic_and_duts["dst_long_link"]:
             if "pkts_num_egr_mem_short_long" in list(qosConfig.keys()):
                 testParams["pkts_num_egr_mem"] = qosConfig["pkts_num_egr_mem_short_long"]
@@ -1958,7 +1957,7 @@ class TestQosSai(QosSaiBase):
             skip_test_on_no_lossless_pg(portSpeedCableLength)
 
         if queueProfile == "wm_q_shared_lossless":
-            if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' and \
+            if dutTestParams["basicParams"]["sonic_asic_type"] == cisco_data.ASIC_TYPE and \
                   not get_src_dst_asic_and_duts['single_asic_test']:
                 dstPortSpeedCableLength = get_portspeed_cablelen(
                     get_src_dst_asic_and_duts['dst_asic'])
@@ -2042,7 +2041,7 @@ class TestQosSai(QosSaiBase):
         disableTest = request.config.getoption("--disable_test")
         portSpeedCableLength = dutQosConfig["portSpeedCableLength"]
         skip_test_on_no_lossless_pg(portSpeedCableLength)
-        if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' or \
+        if dutTestParams["basicParams"]["sonic_asic_type"] == cisco_data.ASIC_TYPE or \
                 ('platform_asic' in dutTestParams["basicParams"] and
                  dutTestParams["basicParams"]["platform_asic"] in ["broadcom-dnx", "mellanox", "marvell-teralynx"]):
             disableTest = False
@@ -2062,7 +2061,7 @@ class TestQosSai(QosSaiBase):
             "src_port_ip": dutConfig["testPorts"]["src_port_ip"]
         })
 
-        if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000':
+        if dutTestParams["basicParams"]["sonic_asic_type"] == cisco_data.ASIC_TYPE:
             src_port_name = dutConfig["dutInterfaces"][testParams["src_port_id"]]
             testParams['dscp_to_pg_map'] = load_dscp_to_pg_map(duthost, src_port_name, dut_qos_maps)
 
@@ -2561,7 +2560,7 @@ class TestQosSai(QosSaiBase):
                 RunAnsibleModuleFail if ptf test fails
         """
 
-        if dutTestParams["basicParams"]["sonic_asic_type"] != "cisco-8000":
+        if dutTestParams["basicParams"]["sonic_asic_type"] != cisco_data.ASIC_TYPE:
             pytest.skip("Xon Hysteresis test is not supported")
 
         src_dut_index = get_src_dst_asic_and_duts['src_dut_index']
