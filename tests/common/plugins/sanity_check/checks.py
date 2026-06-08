@@ -30,6 +30,7 @@ lock = threading.Lock()
 
 CHECK_ITEMS = [
     'check_processes',
+    'check_redis_health',  # Must run before check_dbmemory which crashes if Redis is down
     'check_interfaces',
     'check_bgp',
     'check_dbmemory',
@@ -1381,7 +1382,7 @@ def check_mac_entry_count(duthosts):
 
 @pytest.fixture(scope="module")
 def check_disk_usage(duthosts):
-    """Check disk usage on DUT. Fails if any partition is above the threshold (default 90%).
+    """Check disk usage on DUT. Fails if any partition exceeds the threshold (>90%).
 
     Why 90%: monit monitors disk usage and raises ERR syslog when usage exceeds 90%:
         ERR monit[1722]: 'var-log' space usage 99.4% matches resource limit [space usage > 90.0%]
@@ -1391,9 +1392,12 @@ def check_disk_usage(duthosts):
     2. Kick unhealthy testbeds out of the testplan early
 
     This is a quick checker (completes in <1s) and does not impact overall sanity check time.
+
+    Note: We use > (not >=) to match Monit's strict threshold. Since df reports integer
+    percentages, a value like 89.6% rounds to 90% but doesn't exceed Monit's limit.
     """
 
-    DISK_USAGE_THRESHOLD = 90  # percentage - aligned with monit resource limit
+    DISK_USAGE_THRESHOLD = 90  # percentage - aligned with monit resource limit (>90%)
 
     def _check(*args, **kwargs):
         init_result = {"failed": False, "check_item": "disk_usage"}
@@ -1431,7 +1435,18 @@ def check_disk_usage(duthosts):
                 continue
             mount_point = parts[1]
             filesystem = parts[2] if len(parts) > 2 else ""
-            if usage_pct >= DISK_USAGE_THRESHOLD:
+
+            # Skip read-only squashfs/loop mounts - these are SONiC image mounts
+            # that always report 100% usage by design (e.g., /host/image-*)
+            if "squashfs" in filesystem.lower():
+                continue
+            if filesystem.startswith("/dev/loop"):
+                continue
+            # Skip SONiC image directories which are read-only mounts
+            if mount_point.startswith("/host/image-"):
+                continue
+
+            if usage_pct > DISK_USAGE_THRESHOLD:
                 over_threshold.append({
                     "mount": mount_point,
                     "use_pct": usage_pct,
@@ -1448,6 +1463,63 @@ def check_disk_usage(duthosts):
             logger.info("Disk usage OK on %s" % dut.hostname)
 
         logger.info("Done checking disk usage on %s" % dut.hostname)
+        results[dut.hostname] = check_result
+
+    return _check
+
+
+@pytest.fixture(scope="module")
+def check_redis_health(duthosts):
+    """Check Redis health on DUT.
+
+    This check verifies that Redis is not just running as a container, but is actually
+    responding to commands. This catches the scenario where the database container is
+    running but the Redis process inside has died (MIGSOFTWAR-42197).
+
+    The check performs:
+    1. Redis PING test - verifies Redis server responds with PONG
+    2. Supervisor alerts check - verifies no processes are down inside critical containers
+    """
+
+    def _check(*args, **kwargs):
+        init_result = {"failed": False, "check_item": "redis_health"}
+        result = parallel_run(_check_redis_health_on_dut, args, kwargs, duthosts,
+                              timeout=120, init_result=init_result)
+        return list(result.values())
+
+    @reset_ansible_local_tmp
+    def _check_redis_health_on_dut(*args, **kwargs):
+        dut = kwargs['node']
+        results = kwargs['results']
+        logger.info("Checking Redis health on %s..." % dut.hostname)
+        check_result = {
+            "failed": False,
+            "check_item": "redis_health",
+            "host": dut.hostname,
+            "redis_ping": False,
+            "supervisor_alerts": {}
+        }
+
+        # Check 1: Redis PING test
+        redis_healthy = dut.check_redis_health()
+        check_result["redis_ping"] = redis_healthy
+        if not redis_healthy:
+            check_result["failed"] = True
+            logger.error("Redis PING check failed on %s - Redis may not be running!" % dut.hostname)
+
+        # Check 2: Supervisor alerts - check for processes down inside containers
+        all_ok, down_processes = dut.check_supervisor_alerts()
+        check_result["supervisor_alerts"] = down_processes
+        if not all_ok:
+            check_result["failed"] = True
+            logger.error("Supervisor alerts on %s - processes down: %s" % (dut.hostname, down_processes))
+
+        if not check_result["failed"]:
+            logger.info("Redis health check PASSED on %s" % dut.hostname)
+        else:
+            logger.error("Redis health check FAILED on %s" % dut.hostname)
+
+        logger.info("Done checking Redis health on %s" % dut.hostname)
         results[dut.hostname] = check_result
 
     return _check

@@ -431,6 +431,288 @@ class SonicHost(AnsibleHostBase):
         logging.debug("Status of critical services: %s" % str(result))
         return all(result.values())
 
+    def get_database_docker_names(self):
+        """
+        @summary: Get the list of database docker names for all ASICs on the DUT.
+                  For single ASIC: returns ["database"]
+                  For multi-ASIC: returns ["database", "database0", "database1", ...]
+        @return: List of database container names
+        """
+        database_docker_names = ["database"]  # Global database always exists
+        num_asics = int(self.facts.get("num_asic", 1))
+        if num_asics > 1:
+            # Use asics_present if available (handles non-contiguous/subset ASICs)
+            # Fall back to range(num_asics) for backwards compatibility
+            asic_ids = self.facts.get('asics_present', range(num_asics))
+            for asic in asic_ids:
+                database_docker_names.append("database{}".format(asic))
+        return database_docker_names
+
+    def check_redis_health(self):
+        """
+        @summary: Verify Redis is running and responding inside all database containers.
+                  This checks beyond just container status - it verifies the Redis process
+                  inside each container is actually responsive.
+                  For multi-ASIC systems, checks database, database0, database1, etc.
+        @return: True if all Redis instances respond to PING with PONG, False otherwise
+        """
+        database_containers = self.get_database_docker_names()
+        all_healthy = True
+        failed_containers = []
+
+        # Use timeout to prevent hanging if Redis accepts connection but never replies
+        REDIS_PING_TIMEOUT = 5  # seconds
+
+        for container in database_containers:
+            try:
+                result = self.shell(
+                    "timeout {}s docker exec {} redis-cli ping".format(REDIS_PING_TIMEOUT, container),
+                    module_ignore_errors=True)
+                if result["rc"] == 0 and "PONG" in result["stdout"]:
+                    logging.debug("Redis health check passed for %s - PONG received", container)
+                else:
+                    logging.warning("Redis health check failed for %s - no PONG response. rc=%s, stdout=%s",
+                                    container, result["rc"], result.get("stdout", ""))
+                    all_healthy = False
+                    failed_containers.append(container)
+            except Exception as e:
+                logging.error("Redis health check failed for %s with exception: %s", container, repr(e))
+                all_healthy = False
+                failed_containers.append(container)
+
+        if not all_healthy:
+            logging.error("Redis health check failed for containers: %s", failed_containers)
+            # Gather diagnostics for the first failed container
+            self._collect_redis_failure_diagnostics(failed_containers[0] if failed_containers else "database")
+
+        return all_healthy
+
+    def _collect_redis_failure_diagnostics(self, container="database"):
+        """
+        @summary: Collect diagnostic information when Redis is found to be unhealthy.
+                  Logs information to help identify root cause (OOM, disk full, crash, etc.)
+        @param container: Name of the database container to diagnose (default: "database")
+        """
+        logging.error("=== BEGIN REDIS FAILURE DIAGNOSTICS for %s ===", container)
+
+        # 1. Check if Redis process exists inside the container
+        try:
+            result = self.shell(
+                "docker exec {} ps aux | grep -E 'redis-server|PID' | head -5".format(container),
+                module_ignore_errors=True
+            )
+            logging.error("Redis process status:\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check Redis process: %s", repr(e))
+
+        # 2. Check supervisor status for container
+        try:
+            result = self.shell("docker exec {} supervisorctl status".format(container),
+                                module_ignore_errors=True)
+            logging.error("%s supervisorctl status:\n%s", container, result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to get supervisorctl status: %s", repr(e))
+
+        # 3. Check supervisor log for redis process events
+        try:
+            result = self.shell(
+                "docker exec {} tail -50 /var/log/supervisor/supervisord.log 2>/dev/null | "
+                "grep -i redis || echo 'No redis entries in supervisor log'".format(container),
+                module_ignore_errors=True
+            )
+            logging.error("Supervisor log (redis entries):\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check supervisor log: %s", repr(e))
+
+        # 4. Check for OOM killer in dmesg (host level)
+        try:
+            result = self.shell(
+                "dmesg -T 2>/dev/null | grep -i 'out of memory\\|oom\\|killed process' | tail -10 || "
+                "echo 'No OOM events found'",
+                module_ignore_errors=True
+            )
+            logging.error("OOM killer check (dmesg):\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check dmesg for OOM: %s", repr(e))
+
+        # 5. Check memory status
+        try:
+            result = self.shell("free -h", module_ignore_errors=True)
+            logging.error("Memory status:\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check memory: %s", repr(e))
+
+        # 6. Check disk space (especially /var where Redis data lives)
+        try:
+            result = self.shell("df -h / /var 2>/dev/null || df -h /", module_ignore_errors=True)
+            logging.error("Disk space:\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check disk space: %s", repr(e))
+
+        # 7. Check Redis logs if available
+        try:
+            result = self.shell(
+                "docker exec {} tail -30 /var/log/redis/redis.log 2>/dev/null || "
+                "docker exec {} cat /var/log/syslog 2>/dev/null | grep -i redis | tail -30 || "
+                "echo 'Redis logs not found'".format(container, container),
+                module_ignore_errors=True
+            )
+            logging.error("Redis logs (last 30 lines):\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check Redis logs: %s", repr(e))
+
+        # 8. Check docker events for container restarts
+        try:
+            result = self.shell(
+                "docker events --filter container={} --since 24h --until now "
+                "--format '{{{{.Time}}}} {{{{.Action}}}}' 2>/dev/null | tail -20 || "
+                "echo 'Could not retrieve docker events'".format(container),
+                module_ignore_errors=True,
+                timeout=10
+            )
+            logging.error("Docker events for %s container (last 24h):\n%s", container, result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check docker events: %s", repr(e))
+
+        # 9. Check how long supervisor has known about the down process
+        try:
+            result = self.shell(
+                "docker exec {} cat /var/log/syslog 2>/dev/null | "
+                "grep -i 'supervisor-proc-exit-listener' | grep -i redis | tail -5 || "
+                "echo 'No supervisor-proc-exit-listener entries for redis'".format(container),
+                module_ignore_errors=True
+            )
+            logging.error("Supervisor exit listener entries:\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check supervisor exit listener: %s", repr(e))
+
+        # 10. Check container uptime vs system uptime
+        try:
+            result = self.shell(
+                "echo 'System uptime:' && uptime && "
+                "echo '{} container started:' && "
+                "docker inspect {} --format '{{{{.State.StartedAt}}}}' 2>/dev/null".format(container, container),
+                module_ignore_errors=True
+            )
+            logging.error("Uptime info:\n%s", result.get("stdout", "N/A"))
+        except Exception as e:
+            logging.error("Failed to check uptime: %s", repr(e))
+
+        logging.error("=== END REDIS FAILURE DIAGNOSTICS ===")
+
+    def critical_process_health(self, container_name):
+        """
+        @summary: Check if critical processes inside a container are running.
+                  Uses supervisorctl to verify process states, filtering to only
+                  processes listed in /etc/supervisor/critical_processes.
+                  Non-critical processes (like supervisord-dependent-startup) that
+                  are expected to be EXITED are ignored.
+        @param container_name: Name of the Docker container to check
+        @return: Tuple of (bool, list) - (all_healthy, list of unhealthy processes)
+        """
+        unhealthy_processes = []
+        try:
+            # Get list of critical processes for this container
+            critical_groups, critical_procs, succeeded = \
+                self.get_critical_group_and_process_lists(container_name)
+
+            if not succeeded:
+                logging.warning(
+                    "Could not get critical process list for %s, "
+                    "falling back to checking all processes", container_name
+                )
+                critical_groups = []
+                critical_procs = []
+
+            result = self.shell(
+                "docker exec {} supervisorctl status".format(container_name),
+                module_ignore_errors=True
+            )
+            if result["rc"] != 0:
+                logging.warning("Failed to get supervisorctl status for %s: %s",
+                                container_name, result.get("stderr", ""))
+                return False, ["supervisorctl command failed"]
+
+            for line in result["stdout_lines"]:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split()
+                if not parts:
+                    continue
+
+                process_name = parts[0]
+                # Handle group:process format
+                if ":" in process_name:
+                    group_name = process_name.split(":")[0]
+                    proc_name = process_name.split(":")[1]
+                    is_critical = group_name in critical_groups
+                else:
+                    proc_name = process_name
+                    is_critical = proc_name in critical_procs
+
+                # If we have a critical process list, only check those
+                # If we don't have the list (fallback), check all processes
+                if critical_procs or critical_groups:
+                    if not is_critical:
+                        continue
+
+                # RUNNING is healthy, anything else is not
+                if "RUNNING" not in line:
+                    unhealthy_processes.append(proc_name)
+
+            if unhealthy_processes:
+                logging.warning("Unhealthy critical processes in %s: %s",
+                                container_name, unhealthy_processes)
+                return False, unhealthy_processes
+
+            logging.debug("All critical processes healthy in %s", container_name)
+            return True, []
+
+        except Exception as e:
+            logging.error("Failed to check process health in %s: %s",
+                          container_name, repr(e))
+            return False, ["exception: {}".format(repr(e))]
+
+    def check_supervisor_alerts(self):
+        """
+        @summary: Check for processes that supervisor knows are down but hasn't restarted.
+                  This catches cases where the container is running but critical processes
+                  inside have died (like the Redis issue in MIGSOFTWAR-42197).
+
+                  Uses all_critical_process_status() which properly handles:
+                  - Multi-ASIC container names (swss0, bgp0, etc.)
+                  - Filtering to only critical processes via /etc/supervisor/critical_processes
+                  - Ignoring expected one-shot processes (supervisord-dependent-startup, etc.)
+
+        @return: Tuple of (bool, dict) - (all_ok, dict of container -> list of down processes)
+        """
+        down_processes = {}
+
+        try:
+            all_status = self.all_critical_process_status()
+            for container, status_info in all_status.items():
+                if not status_info['status']:
+                    exited = status_info.get('exited_critical_process', [])
+                    if exited:
+                        down_processes[container] = exited
+                    else:
+                        # status=False but no exited processes means container
+                        # is missing, not started, or unreachable
+                        down_processes[container] = ["container_unavailable"]
+        except Exception as e:
+            logging.error("Failed to check supervisor alerts: %s", repr(e))
+            down_processes["_error"] = ["check failed: {}".format(repr(e))]
+
+        all_ok = len(down_processes) == 0
+        if not all_ok:
+            logging.warning("Supervisor alerts - processes down: %s", down_processes)
+        else:
+            logging.debug("Supervisor alerts check passed - all processes running")
+
+        return all_ok, down_processes
+
     def get_monit_services_status(self):
         """
         @summary: Get metadata (service name, service status and service type) of services
