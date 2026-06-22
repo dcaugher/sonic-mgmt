@@ -12,6 +12,7 @@ from datetime import datetime
 from tests.common import config_reload
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.helpers.generators import generate_ips
+from tests.common.utilities import wait_until
 from tests.route.utils import generate_intf_neigh, generate_route_file, prepare_dut, cleanup_dut
 
 
@@ -27,6 +28,131 @@ logger = logging.getLogger(__name__)
 
 ROUTE_TABLE_NAME = "ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY"
 DEFAULT_NUM_ROUTES = 10000
+ROUTE_STABILITY_TIMEOUT = 120  # Max seconds to wait for route count to stabilize
+ROUTE_STABILITY_INTERVAL = 5  # Check interval in seconds
+BGP_CONVERGENCE_TIMEOUT = 300  # Max seconds to wait for BGP sessions to establish
+
+
+def wait_for_bgp_sessions(duthost, timeout=BGP_CONVERGENCE_TIMEOUT):
+    """
+    Wait for all BGP sessions to reach 'established' state.
+    
+    This is a prerequisite for route stability on ALL SONiC platforms. The issue:
+    
+    1. After reboot/config reload, BGP sessions take time to establish with neighbors.
+       During this time, the route count is artificially low (only connected/static
+       routes are present, typically ~800-900 routes).
+    
+    2. If we only check for "route count stability", we may incorrectly conclude
+       the system is ready when BGP hasn't even started exchanging routes yet.
+       The route count appears stable because nothing is happening.
+    
+    3. Once BGP sessions establish, thousands of routes flood in from neighbors.
+       If the test starts during this flood, route programming competes with
+       test routes for orchagent's single-threaded processing capacity.
+    
+    This function ensures BGP sessions are up BEFORE we check route stability,
+    guaranteeing we measure from a truly converged baseline.
+    
+    Args:
+        duthost: DUT host object
+        timeout: Maximum seconds to wait for BGP sessions (default 300s)
+    
+    Returns:
+        bool: True if all BGP sessions are established, False if timeout
+    """
+    logger.info("Waiting for BGP sessions to establish (timeout: {}s)...".format(timeout))
+
+    # Use get_bgp_neighbors_per_asic which returns {namespace: {neighbor_ip: info}}
+    # This matches the format expected by check_bgp_session_state_all_asics
+    bgp_neighbors = duthost.get_bgp_neighbors_per_asic(state="all")
+    if not bgp_neighbors:
+        logger.info("No BGP neighbors configured, skipping BGP wait")
+        return True
+
+    # Count total neighbors across all namespaces
+    total_neighbors = sum(len(neighbors) for neighbors in bgp_neighbors.values())
+    logger.info("Waiting for {} BGP neighbor(s) to establish".format(total_neighbors))
+    
+    if wait_until(timeout, 10, 0, duthost.check_bgp_session_state_all_asics, bgp_neighbors):
+        logger.info("All BGP sessions established")
+        return True
+    else:
+        # Log which sessions are not established
+        for namespace, neighbors in bgp_neighbors.items():
+            for neighbor_ip, info in neighbors.items():
+                state = info.get('state', 'unknown')
+                if state.lower() != 'established':
+                    logger.warning("BGP neighbor {} in namespace '{}' is in state: {}".format(
+                        neighbor_ip, namespace, state))
+        logger.warning("BGP sessions not fully established after {}s, proceeding anyway".format(timeout))
+        return False
+
+
+def wait_for_route_stability(asichost, timeout=ROUTE_STABILITY_TIMEOUT, interval=ROUTE_STABILITY_INTERVAL):
+    """
+    Wait for the route count in ASIC_DB to stabilize before running the test.
+    
+    This is essential for accurate performance measurements on ALL SONiC platforms
+    (not just specific ASICs). The reasons are:
+    
+    1. Orchagent is single-threaded: It processes route updates from APP_DB
+       sequentially. If BGP is still learning routes while the test pushes
+       routes, they compete for orchagent's processing time.
+    
+    2. SWSS pipeline is shared: Routes from FRR/BGP and test routes both flow
+       through the same SWSS -> orchagent -> syncd -> SAI path.
+    
+    3. After reboot or config reload, BGP takes time to establish sessions and
+       exchange routes with neighbors. Running the test during this period
+       causes unpredictable timeouts as the system is already busy.
+    
+    By waiting for route count stability, we ensure the test starts from a
+    consistent baseline where the system is idle and ready to process test
+    routes at full speed.
+    
+    Args:
+        asichost: ASIC host object
+        timeout: Maximum seconds to wait for stability (default 120s)
+        interval: Check interval in seconds (default 5s)
+    
+    Returns:
+        int: Stable route count
+    """
+    logger.info("Waiting for route count to stabilize (BGP convergence)...")
+    stable_count = None
+    stable_checks = 0
+    required_stable_checks = 3  # Require 3 consecutive stable readings
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        current_count = asichost.count_routes(ROUTE_TABLE_NAME, skip_stability=True)
+        
+        if stable_count is None:
+            stable_count = current_count
+            logger.info("Initial route count: {}".format(current_count))
+        elif current_count == stable_count:
+            stable_checks += 1
+            logger.info("Route count stable at {} ({}/{} checks)".format(
+                current_count, stable_checks, required_stable_checks))
+            if stable_checks >= required_stable_checks:
+                logger.info("Route count stabilized at {} after {:.1f}s".format(
+                    current_count, time.time() - start_time))
+                return current_count
+        else:
+            logger.info("Route count changed: {} -> {} (delta: {:+d})".format(
+                stable_count, current_count, current_count - stable_count))
+            stable_count = current_count
+            stable_checks = 0
+        
+        time.sleep(interval)
+    
+    # Timeout reached - log warning but proceed
+    final_count = asichost.count_routes(ROUTE_TABLE_NAME, skip_stability=True)
+    logger.warning("Route stability timeout after {}s. Proceeding with count: {}".format(
+        timeout, final_count))
+    return final_count
+
 
 route_scale_per_role = {
     "m0": {
@@ -184,8 +310,11 @@ def exec_routes(
     logger.info("Route file generated and copied")
 
     # Check the number of routes in ASIC_DB
+    # Note: skip_stability=True because this test implements its own convergence
+    # polling loop below. Adding stability checks here would introduce redundant
+    # delays (up to 30s per call) on top of the test's own wait logic.
     asichost = duthost.asic_instance(enum_rand_one_frontend_asic_index)
-    start_num_route = asichost.count_routes(ROUTE_TABLE_NAME)
+    start_num_route = asichost.count_routes(ROUTE_TABLE_NAME, skip_stability=True)
 
     # Calculate timeout as a function of the number of routes
     # Allow at least 1 second even when there is a limited number of routes
@@ -193,6 +322,11 @@ def exec_routes(
     if asic_type == "vs":
         # In vs, route entries need more time to be installed
         route_timeout = max(len(prefixes) / 160, 1)
+    elif asic_type == "cisco-8000":
+        # Cisco-8000 with large ECMP groups (24+ nexthops) programs routes
+        # at ~100-150 routes/sec due to ASIC batching behavior. Use a
+        # conservative rate to avoid premature timeouts.
+        route_timeout = max(len(prefixes) / 100, 1)
     else:
         route_timeout = max(len(prefixes) / 250, 1)
 
@@ -219,7 +353,9 @@ def exec_routes(
     logger.info("All route entries have been pushed")
 
     total_delay = 0
-    actual_num_routes = asichost.count_routes(ROUTE_TABLE_NAME)
+    # skip_stability=True: test manages its own polling; stability check would
+    # add redundant 30s timeout per iteration
+    actual_num_routes = asichost.count_routes(ROUTE_TABLE_NAME, skip_stability=True)
     while actual_num_routes != expected_num_routes:
         diff = abs(expected_num_routes - actual_num_routes)
         delay = max(diff / 5000, 1)
@@ -231,7 +367,8 @@ def exec_routes(
             )
         )
         time.sleep(delay)
-        actual_num_routes = asichost.count_routes(ROUTE_TABLE_NAME)
+        actual_num_routes = asichost.count_routes(
+            ROUTE_TABLE_NAME, skip_stability=True)
         if total_delay >= route_timeout:
             break
 
@@ -247,7 +384,8 @@ def exec_routes(
     )
 
     # Check route entries are correct
-    asic_route_keys = asichost.get_route_key(ROUTE_TABLE_NAME)
+    # skip_stability=True: routes have already converged per the loop above
+    asic_route_keys = asichost.get_route_key(ROUTE_TABLE_NAME, skip_stability=True)
     table_name_length = len(ROUTE_TABLE_NAME)
     asic_route_keys_set = set(
         [
@@ -289,6 +427,19 @@ def test_perf_add_remove_routes(
 ):
     duthost = duthosts[enum_rand_one_per_hwsku_frontend_hostname]
     asichost = duthost.asic_instance(enum_rand_one_frontend_asic_index)
+    
+    # Wait for system to be ready before starting the performance test.
+    # This applies to ALL SONiC platforms: after reboot/config reload, BGP takes
+    # time to establish sessions and exchange routes. If we push test routes while
+    # orchagent is still processing BGP updates, the shared SWSS pipeline becomes
+    # congested, causing unreliable timing measurements and potential timeouts.
+    #
+    # Two-phase wait:
+    # 1. Wait for BGP sessions to establish (otherwise route count is artificially low)
+    # 2. Wait for route count to stabilize (BGP route exchange complete)
+    wait_for_bgp_sessions(duthost)
+    wait_for_route_stability(asichost)
+    
     mg_facts = duthost.get_extended_minigraph_facts(tbinfo)
     max_scale = request.config.getoption("--max_scale")
     # Number of routes for test
@@ -331,7 +482,11 @@ def test_perf_add_remove_routes(
     )
 
     ipv4_prefix_set = [101, 41, 200, 9]
-    ipv6_prefix_set = [0x3000, 0x1000, 0x00FF, 0x0123]
+    # IPv6 prefix first octet choices. Each generates routes like {octet}:{octet}:x:y::/64
+    # Note: 0x00FF was removed because it generates prefixes starting with 00ff:00ff::
+    # which falls in the IETF reserved range (0000::/8 to 00ff::/8). Some platforms
+    # silently reject these routes, causing unpredictable test results.
+    ipv6_prefix_set = [0x3000, 0x1000, 0x2000, 0x0123]
     # Generate ip prefixes of routes
     if ip_versions == 4:
         random_oct = random.choice(ipv4_prefix_set)

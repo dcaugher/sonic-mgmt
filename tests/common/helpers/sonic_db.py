@@ -4,6 +4,7 @@ import six
 import ast
 from tests.common.helpers.constants import DEFAULT_NAMESPACE
 from tests.common.devices.sonic_asic import SonicAsic
+from tests.common.helpers.redis_scan import RedisScan
 
 logger = logging.getLogger(__name__)
 
@@ -576,16 +577,23 @@ class SonicDbNoCommandOutput(Exception):
     pass
 
 
-def redis_get_keys(duthost, db_id, pattern):
+def redis_get_keys(duthost, db_id, pattern, skip_stability=True):
     """
-    Get all keys for a given pattern in given redis database
+    Get all keys for a given pattern in given redis database.
+
+    Uses SCAN instead of KEYS to avoid blocking Redis during large scans.
+
     :param duthost: DUT host object
-    :param db_id: ID of redis database
+    :param db_id: ID/name of redis database (e.g., 'ASIC_DB', 'CONFIG_DB')
     :param pattern: Redis key pattern
-    :return: A list of key name in string
+    :param skip_stability: If True (default), return immediately without waiting
+        for keyspace to stabilize. Set to False only when you need consistency
+        guarantees during concurrent modifications.
+    :return: A list of key names (empty list if no keys match)
     """
-    cmd = 'sonic-db-cli {} KEYS \"{}\"'.format(db_id, pattern)
-    logger.debug('Getting keys from redis by command: {}'.format(cmd))
-    output = duthost.shell(cmd)
-    content = output['stdout'].strip()
-    return content.split('\n') if content else None
+    logger.debug('Getting keys from redis db=%s pattern=%s', db_id, pattern)
+    scanner = RedisScan(duthost)
+    # Let RedisScanError propagate - callers should handle scan failures explicitly
+    # rather than silently treating errors as "no keys found"
+    keys = scanner.scan_keys(db_id, pattern, skip_stability=skip_stability)
+    return list(keys) if keys else []

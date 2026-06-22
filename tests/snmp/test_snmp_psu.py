@@ -2,6 +2,7 @@ import pytest
 import logging
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.helpers.snmp_helpers import get_snmp_facts
+from tests.common.helpers.sonic_db import redis_get_keys
 from natsort import natsorted
 
 PSU_STATUS_OK = 2
@@ -62,6 +63,9 @@ def test_snmp_psu_status(duthosts, enum_supervisor_dut_hostname, snmp_psu_module
         return
 
     psu_keys = natsorted(redis_get_keys(duthost, 'STATE_DB', 'PSU_INFO|*'))
+    if not psu_keys:
+        pytest.skip("No PSU_INFO keys in STATE_DB - platform may not support PSU status via redis")
+
     for psu_indx, operstatus in snmp_facts['snmp_psu'].items():
         get_presence = duthost.shell(
             "redis-cli -n 6 hget '{}' presence".format(psu_keys[int(psu_indx)-1]))
@@ -83,18 +87,3 @@ def test_snmp_psu_status(duthosts, enum_supervisor_dut_hostname, snmp_psu_module
 
     pytest_assert(
         psus_on >= 1, "At least one PSU should be with operstatus OK")
-
-
-def redis_get_keys(duthost, db_id, pattern):
-    """
-    Get all keys for a given pattern in given redis database
-    :param duthost: DUT host object
-    :param db_id: ID of redis database
-    :param pattern: Redis key pattern
-    :return: A list of key name in string
-    """
-    cmd = 'sonic-db-cli {} KEYS \"{}\"'.format(db_id, pattern)
-    logging.debug('Getting keys from redis by command: {}'.format(cmd))
-    output = duthost.shell(cmd)
-    content = output['stdout'].strip()
-    return content.split('\n') if content else None

@@ -10,6 +10,7 @@ from .vnet_constants import TEMPLATE_DIR, VXLAN_UDP_SPORT_KEY, VXLAN_UDP_SPORT_M
 from .vnet_constants import VXLAN_PORT, VXLAN_MAC
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.utilities import wait_until
+from tests.common.helpers.redis_scan import RedisScan
 
 logger = logging.getLogger(__name__)
 
@@ -250,13 +251,16 @@ def count_hosts_from_conf(duthost):
 
 
 def count_routes_from_conf(duthost):
-    num_routes = int(duthost.shell("cat {} | grep VNET_ROUTE | wc -l".format(DUT_VNET_ROUTE_JSON))['stdout_lines'][0])
+    num_routes = int(duthost.shell(
+        "cat {} | grep VNET_ROUTE | wc -l".format(DUT_VNET_ROUTE_JSON)
+    )['stdout_lines'][0])
     return num_routes
 
 
 def count_routes_from_asic_db(duthost):
-    num_routes = int(duthost.shell("redis-cli -n 1 keys *ROUTE_ENTRY* | wc -l")['stdout_lines'][0])
-    return num_routes
+    """Count route entries in ASIC_DB using non-blocking SCAN."""
+    scanner = RedisScan(duthost)
+    return scanner.count_keys("ASIC_DB", "*ROUTE_ENTRY*", skip_stability=True)
 
 
 def verify_routes_configured(duthost, routes_num_before_change, action):

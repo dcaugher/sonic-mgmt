@@ -1,4 +1,8 @@
 import json
+import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def generate_intf_neigh(asichost, num_neigh, ip_version, mg_facts=None, is_backend_topology=False):
@@ -109,6 +113,9 @@ def prepare_dut(asichost, intf_neighs):
             + " dev "
             + intf_neigh["interface"]
         )
+    # Allow time for neighbors to sync to ASIC_DB (needed for some platforms like cisco-8000)
+    logger.info("Waiting for neighbor entries to sync to hardware...")
+    time.sleep(5)
 
 
 def cleanup_dut(asichost, intf_neighs):

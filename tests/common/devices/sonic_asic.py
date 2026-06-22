@@ -4,6 +4,7 @@ import socket
 import re
 
 from tests.common.cache import cached
+from tests.common.helpers.redis_scan import RedisScan
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.helpers.cache_utils import sonic_asic_zone_getter
 from tests.common.helpers.constants import DEFAULT_NAMESPACE, NAMESPACE_PREFIX
@@ -752,21 +753,42 @@ class SonicAsic(object):
         mapping = self.sonichost.get_crm_resources(self.namespace)
         return mapping.get(resource_type).get(route_tag, {}).get(count_type)
 
-    def count_routes(self, ROUTE_TABLE_NAME):
-        ns_prefix = ""
-        if self.sonichost.is_multi_asic:
-            ns_prefix = '-n ' + str(self.namespace)
-        return int(self.shell(
-            'sonic-db-cli {} ASIC_DB eval "return #redis.call(\'keys\', \'{}*\')" 0'
-            .format(ns_prefix, ROUTE_TABLE_NAME),
-            module_ignore_errors=True, verbose=True)['stdout'])
+    def count_routes(self, ROUTE_TABLE_NAME, skip_stability=False):
+        """Count routes matching the given table name pattern.
 
-    def get_route_key(self, ROUTE_TABLE_NAME):
-        ns_prefix = ""
-        if self.sonichost.is_multi_asic:
-            ns_prefix = '-n ' + str(self.namespace)
-        return self.shell('sonic-db-cli {} ASIC_DB eval "return redis.call(\'keys\', \'{}*\')" 0'
-                          .format(ns_prefix, ROUTE_TABLE_NAME), verbose=False)['stdout_lines']
+        Uses SCAN instead of KEYS to avoid blocking Redis.
+
+        Args:
+            ROUTE_TABLE_NAME: Route table pattern (e.g., 'ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY')
+            skip_stability: If True, return immediately without waiting for keyspace
+                to stabilize. Only use for debug/informational purposes.
+
+        Returns:
+            Number of matching route entries
+        """
+        scanner = RedisScan(self.sonichost, namespace=self.namespace)
+        return scanner.count_keys(
+            "ASIC_DB", f"{ROUTE_TABLE_NAME}*", skip_stability=skip_stability
+        )
+
+    def get_route_key(self, ROUTE_TABLE_NAME, skip_stability=False):
+        """Get all route keys matching the given table name pattern.
+
+        Uses SCAN instead of KEYS to avoid blocking Redis.
+
+        Args:
+            ROUTE_TABLE_NAME: Route table pattern (e.g., 'ASIC_STATE:SAI_OBJECT_TYPE_ROUTE_ENTRY')
+            skip_stability: If True, return immediately without waiting for keyspace
+                to stabilize. Only use for debug/informational purposes.
+
+        Returns:
+            List of matching route key names
+        """
+        scanner = RedisScan(self.sonichost, namespace=self.namespace)
+        keys = scanner.scan_keys(
+            "ASIC_DB", f"{ROUTE_TABLE_NAME}*", skip_stability=skip_stability
+        )
+        return list(keys)
 
     def show_and_parse(self, show_cmd, **kwargs):
         return self.sonichost.show_and_parse("{}{}".format(self.ns_arg, show_cmd), **kwargs)

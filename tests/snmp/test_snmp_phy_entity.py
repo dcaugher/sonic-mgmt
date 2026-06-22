@@ -9,8 +9,11 @@ from tests.common.utilities import wait_until
 from tests.common.helpers.assertions import pytest_require
 from tests.common.helpers.snmp_helpers import get_snmp_facts
 from tests.common.helpers.assertions import pytest_assert
-from tests.common.helpers.psu_helpers import turn_on_all_outlets, check_outlet_status, get_grouped_pdus_by_psu
+from tests.common.helpers.psu_helpers import (
+    turn_on_all_outlets, check_outlet_status, get_grouped_pdus_by_psu
+)
 from tests.common.helpers.sensor_control_test_helper import mocker_factory  # noqa: F401
+from tests.common.helpers.redis_scan import RedisScan
 
 pytestmark = [
     pytest.mark.topology('any'),
@@ -1564,29 +1567,33 @@ def test_remove_insert_fan_and_check_fan_info(duthosts, enum_rand_one_per_hwsku_
 
 def redis_get_keys(duthost, db_id, pattern):
     """
-    Get all keys for a given pattern in given redis database
+    Get all keys for a given pattern in given redis database.
+
+    Uses SCAN instead of KEYS to avoid blocking Redis.
+    Handles multi-ASIC platforms by searching all namespaces.
+
     :param duthost: DUT host object
     :param db_id: ID of redis database
     :param pattern: Redis key pattern
-    :return: A list of key name in string
+    :return: A list of key names (empty list if no keys match)
     """
-    totalOutput = []
+    all_keys = set()
 
-    def run_cmd_store_output(cmd):
-        logging.debug('Getting keys from redis by command: {}'.format(cmd))
-        output = duthost.shell(cmd)['stdout'].strip()
-        if output:
-            totalOutput.extend(output.split('\n'))
-
+    # Let RedisScanError propagate - callers should handle scan failures explicitly
+    # rather than silently treating errors as "no keys found"
     if duthost.is_multi_asic:
         # Search the namespaces as well on LCs
         for asic in duthost.frontend_asics:
-            cmd = 'sonic-db-cli -n {} {} KEYS \"{}\"'.format(asic.namespace, db_id, pattern)
-            run_cmd_store_output(cmd)
+            scanner = RedisScan(duthost, namespace=asic.namespace)
+            keys = scanner.scan_keys(db_id, pattern, skip_stability=True)
+            all_keys.update(keys)
 
-    cmd = 'sonic-db-cli {} KEYS \"{}\"'.format(db_id, pattern)
-    run_cmd_store_output(cmd)
-    return totalOutput if totalOutput else None
+    # Also search default namespace
+    scanner = RedisScan(duthost)
+    keys = scanner.scan_keys(db_id, pattern, skip_stability=True)
+    all_keys.update(keys)
+
+    return list(all_keys)
 
 
 def redis_hgetall(duthost, db_id, key):
