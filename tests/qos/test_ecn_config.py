@@ -126,6 +126,13 @@ def test_verify_ecn_marking_config(duthosts, rand_one_dut_hostname, request):
     if not data or 'hbm_usage' in data:
         pytest.skip("Skipping as a HBM based device")
 
+    # GR2 (G200/G2xx) reports the SMS/global axis as pool availability, not occupancy.
+    npu_global_cmd = "show platform npu global -n asic0" if duthost.is_multi_asic else "show platform npu global"
+    enable_serviceability_cli(duthost, npu_global_cmd)
+    npu_global_result = duthost.command(npu_global_cmd)
+    verify_command_result(npu_global_result, npu_global_cmd)
+    is_gr2 = any('Asic' in line and 'Gr2' in line for line in npu_global_result['stdout'].splitlines())
+
     asic_facts = get_asic_facts(duthost)
     asic_namespace_string = ""
     asics = []
@@ -265,7 +272,11 @@ def test_verify_ecn_marking_config(duthosts, rand_one_dut_hostname, request):
                         for voq_idx in range(voq_quant_len):
                             for age_idx in range(age_quant_len):
                                 actual_value = voq_drop_data[g_idx][voq_idx][age_idx]
-                                expected_value = 7 if voq_idx == (voq_quant_len - 1) else 0
+                                if is_gr2 and g_idx == 0:
+                                    # GR2 pool region 0 is availability<=0: SDK drops across all VoQ regions
+                                    expected_value = 7
+                                else:
+                                    expected_value = 7 if voq_idx == (voq_quant_len - 1) else 0
                                 assert (
                                         actual_value == expected_value
                                 ), '''
